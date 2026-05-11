@@ -69,7 +69,8 @@ npm run deploy
 
 - `npm run dev` - run Wrangler locally
 - `npm run typecheck` - TypeScript check
-- `npm run db:generate` - generate Drizzle migrations from schema changes
+- `npm run auth:schema:generate` - regenerate the Better Auth Drizzle schema (`src/db/auth-schema.gen.ts`)
+- `npm run db:generate` - regenerate the auth schema, then generate Drizzle migrations from schema changes
 - `npm run db:migrate:local` - apply D1 migrations locally
 - `npm run db:migrate:remote` - apply D1 migrations remotely
 - `npm run deploy` - deploy Worker

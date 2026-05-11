@@ -1,9 +1,9 @@
-import { betterAuth } from "better-auth";
-import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { and, asc, desc, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
+import { createAuthFromEnv } from "./auth";
+import * as authSchema from "./db/auth-schema.gen";
 import * as schema from "./db/schema";
 import { RoomSignaling } from "./room-signaling";
 import { homePage, roomPage } from "./views";
@@ -22,30 +22,10 @@ type Env = {
 const createDb = (env: Env) => drizzle(env.DB, { schema });
 type Database = ReturnType<typeof createDb>;
 
-const createAuth = (env: Env, db: Database) => {
-  const trustedOrigins = [env.APP_ORIGIN, env.BETTER_AUTH_URL].filter(Boolean) as string[];
+const createRuntimeAuth = (env: Env, db: Database) =>
+  createAuthFromEnv(env, db, authSchema);
 
-  return betterAuth({
-    secret: env.BETTER_AUTH_SECRET,
-    baseURL: env.BETTER_AUTH_URL,
-    trustedOrigins: trustedOrigins.length ? trustedOrigins : undefined,
-    database: drizzleAdapter(db, {
-      provider: "sqlite",
-      schema: {
-        user: schema.user,
-        session: schema.session,
-        account: schema.account,
-        verification: schema.verification,
-      },
-    }),
-    emailAndPassword: {
-      enabled: true,
-      requireEmailVerification: false,
-    },
-  });
-};
-
-type Auth = ReturnType<typeof createAuth>;
+type Auth = ReturnType<typeof createRuntimeAuth>;
 type AppBindings = { Bindings: Env; Variables: { db: Database; auth: Auth } };
 type AppContext = Context<AppBindings>;
 
@@ -103,7 +83,7 @@ const completeRecordingSchema = z.object({
 app.use("*", async (c, next) => {
   const db = createDb(c.env);
   c.set("db", db);
-  c.set("auth", createAuth(c.env, db));
+  c.set("auth", createRuntimeAuth(c.env, db));
   await next();
 });
 
