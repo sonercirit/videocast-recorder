@@ -1,0 +1,25 @@
+name = "videocast-recorder"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Set these in production with `wrangler secret put BETTER_AUTH_SECRET`.
+# For local development copy .dev.vars.example to .dev.vars.
+
+[[d1_databases]]
+binding = "DB"
+database_name = "videocast-recorder"
+# Replace after running: wrangler d1 create videocast-recorder
+database_id = "00000000-0000-0000-0000-000000000000"
+
+[[r2_buckets]]
+binding = "RECORDINGS"
+bucket_name = "videocast-recordings"
+
+[[durable_objects.bindings]]
+name = "ROOM_SIGNALING"
+class_name = "RoomSignaling"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RoomSignaling"]
