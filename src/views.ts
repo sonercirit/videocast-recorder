@@ -274,11 +274,11 @@ export function roomPage(roomId: string) {
         <span class="label">You</span>
       </div>
     </div>
+  </div>
 
-    <div class="card stack">
-      <div class="row spread"><h3>Recordings for this room</h3><button id="refresh-recordings" class="secondary" type="button">Refresh</button></div>
-      <div id="recordings" class="recording-list"><p class="muted">No recordings yet.</p></div>
-    </div>
+  <div class="card stack">
+    <div class="row spread"><h3>Recordings for this room</h3><button id="refresh-recordings" class="secondary" type="button">Refresh</button></div>
+    <div id="recordings" class="recording-list"><p class="muted">No recordings yet.</p></div>
   </div>
 </section>`;
 
@@ -632,10 +632,16 @@ async function loadRecordings() {
     const item = document.createElement('div');
     item.className = 'recording-item';
     const duration = recording.durationMs ? Math.round(recording.durationMs / 1000) + 's' : 'in progress';
-    item.innerHTML = '<div class="row spread"><strong></strong><span class="pill"></span></div><div class="muted small"></div>';
+    item.innerHTML = '<div class="row spread"><strong></strong><div class="row"><a class="pill download-link hidden">Download</a><span class="pill status-pill"></span></div></div><div class="muted small"></div>';
     item.querySelector('strong').textContent = recording.quality + ' local recording';
-    item.querySelector('.pill').textContent = recording.status;
+    item.querySelector('.status-pill').textContent = recording.status;
     item.querySelector('.muted').textContent = recording.chunkCount + ' chunks · ' + duration + ' · ' + recording.mimeType;
+    const downloadLink = item.querySelector('.download-link');
+    if (recording.status === 'completed' && recording.chunkCount > 0) {
+      downloadLink.href = '/api/recordings/' + encodeURIComponent(recording.id) + '/download';
+      downloadLink.setAttribute('download', '');
+      downloadLink.classList.remove('hidden');
+    }
     container.appendChild(item);
   }
 }

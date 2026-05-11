@@ -20,6 +20,7 @@ A Cloudflare-native videocast prototype using:
 - MediaRecorder emits chunks every 5s; chunks upload to R2 under:
   `rooms/{roomId}/recordings/{recordingId}/chunks/{000000}.webm`
 - On completion, the Worker writes `rooms/{roomId}/recordings/{recordingId}/manifest.json` to R2.
+- Completed recordings can be downloaded as a single media file streamed from their ordered R2 chunks.
 - D1 stores users, sessions, rooms, participants, recordings, and uploaded chunks.
 
 ## Local setup

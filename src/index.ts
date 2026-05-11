@@ -412,6 +412,49 @@ app.get("/api/rooms/:roomId/recordings", async (c) => {
   return c.json({ recordings });
 });
 
+app.get("/api/recordings/:recordingId/download", async (c) => {
+  const auth = await getSession(c);
+  if (!auth) return c.json({ error: "Unauthorized" }, 401);
+
+  const recording = await getRecording(c.get("db"), c.req.param("recordingId"));
+  if (!recording) return c.json({ error: "Recording not found" }, 404);
+
+  const room = await getRoom(c.get("db"), recording.roomId);
+  if (!room) return c.json({ error: "Room not found" }, 404);
+  if (recording.userId !== auth.user.id && room.ownerUserId !== auth.user.id) {
+    return c.json({ error: "Forbidden" }, 403);
+  }
+  if (recording.status !== "completed") {
+    return c.json({ error: "Recording is not completed" }, 409);
+  }
+
+  const chunks = await c
+    .get("db")
+    .select()
+    .from(schema.recordingChunks)
+    .where(eq(schema.recordingChunks.recordingId, recording.id))
+    .orderBy(asc(schema.recordingChunks.chunkIndex));
+
+  if (!chunks.length) return c.json({ error: "Recording has no uploaded chunks" }, 404);
+
+  const headers = new Headers();
+  headers.set("content-type", recording.mimeType || "application/octet-stream");
+  headers.set(
+    "content-disposition",
+    `attachment; filename="${downloadFileName(room.name, recording.id, recording.mimeType)}"`,
+  );
+  headers.set("cache-control", "private, max-age=60");
+  headers.set("x-recording-id", recording.id);
+  headers.set("x-recording-chunks", String(chunks.length));
+
+  if (chunks.every((chunk) => chunk.byteLength > 0)) {
+    const totalBytes = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+    headers.set("content-length", String(totalBytes));
+  }
+
+  return new Response(createRecordingDownloadStream(c.env.RECORDINGS, chunks), { headers });
+});
+
 app.get("/api/recordings/:recordingId/chunks/:chunkIndex", async (c) => {
   const auth = await getSession(c);
   if (!auth) return c.json({ error: "Unauthorized" }, 401);
@@ -515,6 +558,58 @@ function extensionForMime(mimeType: string) {
   if (mimeType.includes("mp4")) return "mp4";
   if (mimeType.includes("ogg")) return "ogv";
   return "webm";
+}
+
+function downloadFileName(roomName: string, recordingId: string, mimeType: string) {
+  const safeRecordingId = recordingId.replace(/[^a-zA-Z0-9_-]/g, "");
+  return `${slugify(roomName)}-${safeRecordingId}.${extensionForMime(mimeType)}`;
+}
+
+function createRecordingDownloadStream(
+  bucket: R2Bucket,
+  chunks: Array<{ r2Key: string; chunkIndex: number }>,
+) {
+  let chunkPosition = 0;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      while (true) {
+        if (!reader) {
+          if (chunkPosition >= chunks.length) {
+            controller.close();
+            return;
+          }
+
+          const chunk = chunks[chunkPosition];
+          const object = await bucket.get(chunk.r2Key);
+          if (!object?.body) {
+            controller.error(new Error(`Missing recording chunk ${chunk.chunkIndex}`));
+            return;
+          }
+          reader = object.body.getReader();
+        }
+
+        const activeReader = reader;
+        const { done, value } = await activeReader.read();
+        if (reader !== activeReader) return;
+        if (done) {
+          activeReader.releaseLock();
+          reader = null;
+          chunkPosition += 1;
+          continue;
+        }
+
+        if (value) controller.enqueue(value);
+        return;
+      }
+    },
+    async cancel() {
+      const activeReader = reader;
+      reader = null;
+      await activeReader?.cancel();
+    },
+  });
 }
 
 export default app;
