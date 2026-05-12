@@ -42,6 +42,18 @@ label { display: grid; gap: 0.35rem; color: #b8c2d8; font-size: 0.92rem; }
 .recording-dot.live { background: #e5484d; box-shadow: 0 0 18px rgba(229,72,77,0.9); }
 .checkbox { display: flex; align-items: center; gap: 0.55rem; color: #b8c2d8; }
 .checkbox input { width: auto; }
+.option-section { display: grid; gap: 0.65rem; }
+.option-title { color: #edf2ff; font-weight: 800; }
+.radio-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.65rem; }
+.radio-card { display: grid; grid-template-columns: auto 1fr; align-items: start; gap: 0.65rem; padding: 0.8rem; border: 1px solid rgba(255,255,255,0.1); border-radius: 0.9rem; background: rgba(255,255,255,0.04); color: #edf2ff; cursor: pointer; }
+.radio-card input { width: auto; margin-top: 0.2rem; }
+.radio-card:has(input:checked) { border-color: #8fb3ff; background: rgba(93,124,255,0.18); box-shadow: 0 0 0 1px rgba(143,179,255,0.22); }
+.radio-card.unsupported { opacity: 0.58; cursor: not-allowed; background: rgba(229,72,77,0.08); border-color: rgba(229,72,77,0.28); }
+.radio-card .option-copy { display: grid; gap: 0.18rem; }
+.radio-card .option-meta { color: #8e9bb5; font-size: 0.83rem; }
+.option-warning { color: #ffb0b3; font-size: 0.82rem; }
+.device-status { color: #b8c2d8; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.09); padding: 0.75rem; border-radius: 0.8rem; }
+.device-status.warning { color: #ffd2a8; background: rgba(255,176,0,0.10); border-color: rgba(255,176,0,0.28); }
 .recording-list { display: grid; gap: 0.75rem; }
 .recording-item { border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.03); border-radius: 0.9rem; padding: 0.85rem; }
 .small { font-size: 0.88rem; }
@@ -245,11 +257,20 @@ export function roomPage(roomId: string) {
 
   <div id="join-panel" class="card stack">
     <h2>Join videocast</h2>
-    <p class="muted">Pick the camera quality and frame rate used for your local recording. Higher settings create larger R2 uploads.</p>
+    <p class="muted">Pick your webcam, microphone, recording resolution, and frame rate. Higher settings create larger R2 uploads.</p>
+    <div id="device-status" class="device-status">Detecting webcam quality and available devices...</div>
     <div class="grid">
-      <label>Local recording quality <select id="quality-select"></select></label>
-      <label>Frame rate <select id="frame-rate-select"></select></label>
+      <label>Webcam <select id="camera-select"></select></label>
+      <label>Microphone <select id="microphone-select"></select></label>
       <label class="checkbox"><input id="auto-record" type="checkbox" checked /> Start local recording in the background when I join</label>
+    </div>
+    <div class="option-section">
+      <div class="option-title">Resolution</div>
+      <div id="quality-options" class="radio-grid"></div>
+    </div>
+    <div class="option-section">
+      <div class="option-title">Frame rate</div>
+      <div id="frame-rate-options" class="radio-grid"></div>
     </div>
     <button id="join-button">Join with camera and microphone</button>
   </div>
@@ -293,6 +314,15 @@ let qualityPresets = {};
 let frameRatePresets = [];
 let selectedQuality = 'medium';
 let selectedFrameRate = 30;
+let videoDevices = [];
+let audioInputDevices = [];
+let selectedVideoDeviceId = '';
+let selectedAudioDeviceId = '';
+let selectedVideoDeviceLabel = '';
+let selectedAudioDeviceLabel = '';
+let webcamSupport = null;
+let hardwareDetectionInProgress = false;
+let hardwareDetectionRun = 0;
 let localStream = null;
 let ws = null;
 let participantId = null;
@@ -361,8 +391,10 @@ async function init() {
     const qualityData = await api('/api/recording-qualities');
     qualityPresets = qualityData.qualities;
     frameRatePresets = qualityData.frameRates || [{ id: '30', label: '30 FPS', frameRate: 30 }];
-    renderQualitySelect();
-    renderFrameRateSelect();
+    renderDeviceSelects();
+    renderQualityOptions();
+    renderFrameRateOptions();
+    detectDevicesAndHardware().catch(showError);
     await loadRecordings();
   } catch (error) {
     showError(error);
@@ -370,48 +402,404 @@ async function init() {
   }
 }
 
-function renderQualitySelect() {
-  const select = $('quality-select');
-  select.innerHTML = '';
-  for (const quality of Object.values(qualityPresets)) {
-    const option = document.createElement('option');
-    option.value = quality.id;
-    option.textContent = quality.label + ' · ' + quality.width + 'x' + quality.height;
-    if (quality.id === 'medium') option.selected = true;
-    select.appendChild(option);
+function setDeviceStatus(message, warning) {
+  const status = $('device-status');
+  status.textContent = message;
+  status.classList.toggle('warning', Boolean(warning));
+}
+
+function formatDeviceLabel(device, fallback) {
+  return device && device.label ? device.label : fallback;
+}
+
+function findDeviceByIdOrLabel(devices, deviceId, label) {
+  return devices.find((device) => deviceId && device.deviceId === deviceId) ||
+    devices.find((device) => label && device.label === label) ||
+    null;
+}
+
+function syncSelectedDevicesWithLists() {
+  const videoDevice = findDeviceByIdOrLabel(videoDevices, selectedVideoDeviceId, selectedVideoDeviceLabel);
+  if (videoDevice) {
+    selectedVideoDeviceId = videoDevice.deviceId || selectedVideoDeviceId;
+    selectedVideoDeviceLabel = videoDevice.label || selectedVideoDeviceLabel;
+  } else if (selectedVideoDeviceId && videoDevices.length) {
+    selectedVideoDeviceId = '';
+  }
+
+  const audioDevice = findDeviceByIdOrLabel(audioInputDevices, selectedAudioDeviceId, selectedAudioDeviceLabel);
+  if (audioDevice) {
+    selectedAudioDeviceId = audioDevice.deviceId || selectedAudioDeviceId;
+    selectedAudioDeviceLabel = audioDevice.label || selectedAudioDeviceLabel;
+  } else if (selectedAudioDeviceId && audioInputDevices.length) {
+    selectedAudioDeviceId = '';
   }
 }
 
-function renderFrameRateSelect() {
-  const select = $('frame-rate-select');
-  select.innerHTML = '';
-  for (const frameRatePreset of frameRatePresets) {
+function selectedOption(select) {
+  return select.options[select.selectedIndex] || null;
+}
+
+function updateSelectedDevicesFromSelects() {
+  const cameraOption = selectedOption($('camera-select'));
+  const microphoneOption = selectedOption($('microphone-select'));
+  selectedVideoDeviceId = cameraOption?.dataset.deviceId || '';
+  selectedVideoDeviceLabel = cameraOption?.dataset.label || cameraOption?.textContent || selectedVideoDeviceLabel;
+  selectedAudioDeviceId = microphoneOption?.dataset.deviceId || '';
+  selectedAudioDeviceLabel = microphoneOption?.dataset.label || microphoneOption?.textContent || selectedAudioDeviceLabel;
+}
+
+function renderDeviceSelects() {
+  const cameraSelect = $('camera-select');
+  const microphoneSelect = $('microphone-select');
+  cameraSelect.innerHTML = '';
+  microphoneSelect.innerHTML = '';
+  syncSelectedDevicesWithLists();
+
+  const selectedVideoDevice = findDeviceByIdOrLabel(videoDevices, selectedVideoDeviceId, selectedVideoDeviceLabel);
+  if (!videoDevices.length) {
     const option = document.createElement('option');
-    option.value = String(frameRatePreset.frameRate);
-    option.textContent = frameRatePreset.label;
-    if (frameRatePreset.frameRate === 30) option.selected = true;
-    select.appendChild(option);
+    option.value = '';
+    option.dataset.deviceId = '';
+    option.dataset.label = selectedVideoDeviceLabel || 'Default camera';
+    option.textContent = selectedVideoDeviceLabel || 'Default camera';
+    cameraSelect.appendChild(option);
+  } else {
+    videoDevices.forEach((device, index) => {
+      const option = document.createElement('option');
+      option.value = device.deviceId || device.label || 'camera-' + index;
+      option.dataset.deviceId = device.deviceId || '';
+      option.dataset.label = device.label || '';
+      option.textContent = formatDeviceLabel(device, 'Camera ' + (index + 1));
+      option.selected = selectedVideoDevice ? device === selectedVideoDevice : index === 0;
+      cameraSelect.appendChild(option);
+    });
+  }
+
+  const selectedAudioDevice = findDeviceByIdOrLabel(audioInputDevices, selectedAudioDeviceId, selectedAudioDeviceLabel);
+  if (!audioInputDevices.length) {
+    const option = document.createElement('option');
+    option.value = '';
+    option.dataset.deviceId = '';
+    option.dataset.label = selectedAudioDeviceLabel || 'Default microphone';
+    option.textContent = selectedAudioDeviceLabel || 'Default microphone';
+    microphoneSelect.appendChild(option);
+  } else {
+    audioInputDevices.forEach((device, index) => {
+      const option = document.createElement('option');
+      option.value = device.deviceId || device.label || 'microphone-' + index;
+      option.dataset.deviceId = device.deviceId || '';
+      option.dataset.label = device.label || '';
+      option.textContent = formatDeviceLabel(device, 'Microphone ' + (index + 1));
+      option.selected = selectedAudioDevice ? device === selectedAudioDevice : index === 0;
+      microphoneSelect.appendChild(option);
+    });
+  }
+
+  updateSelectedDevicesFromSelects();
+}
+
+async function refreshDeviceLists() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  videoDevices = devices.filter((device) => device.kind === 'videoinput');
+  audioInputDevices = devices.filter((device) => device.kind === 'audioinput');
+  syncSelectedDevicesWithLists();
+}
+
+function capabilityNumber(range, key) {
+  if (!range || typeof range !== 'object') return null;
+  const value = range[key];
+  return Number.isFinite(value) ? Number(value) : null;
+}
+
+function supportFromTrack(track) {
+  const capabilities = typeof track.getCapabilities === 'function' ? track.getCapabilities() : {};
+  const settings = typeof track.getSettings === 'function' ? track.getSettings() : {};
+  const maxWidth = capabilityNumber(capabilities.width, 'max');
+  const maxHeight = capabilityNumber(capabilities.height, 'max');
+  const maxFrameRate = capabilityNumber(capabilities.frameRate, 'max');
+  return {
+    label: track.label || selectedCameraLabel() || selectedVideoDeviceLabel || 'Selected webcam',
+    maxWidth,
+    maxHeight,
+    maxFrameRate,
+    currentWidth: Number.isFinite(settings.width) ? Math.round(settings.width) : null,
+    currentHeight: Number.isFinite(settings.height) ? Math.round(settings.height) : null,
+    currentFrameRate: Number.isFinite(settings.frameRate) ? Math.round(settings.frameRate) : null,
+    hasMaximums: Boolean(maxWidth || maxHeight || maxFrameRate),
+  };
+}
+
+function selectedCameraLabel() {
+  const selected = findDeviceByIdOrLabel(videoDevices, selectedVideoDeviceId, selectedVideoDeviceLabel);
+  return selected ? selected.label : selectedVideoDeviceLabel;
+}
+
+function stopStream(stream) {
+  if (!stream) return;
+  for (const track of stream.getTracks()) track.stop();
+}
+
+function selectedVideoConstraint() {
+  return selectedVideoDeviceId ? { deviceId: { exact: selectedVideoDeviceId } } : true;
+}
+
+async function detectDevicesAndHardware() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    setDeviceStatus('Camera detection is not supported by this browser.', true);
+    return;
+  }
+
+  const run = ++hardwareDetectionRun;
+  hardwareDetectionInProgress = true;
+  $('join-button').disabled = true;
+  setDeviceStatus('Requesting camera and microphone permission to detect webcam quality...', false);
+  let permissionStream = null;
+  try {
+    try {
+      permissionStream = await navigator.mediaDevices.getUserMedia({ video: selectedVideoConstraint(), audio: true });
+    } catch (error) {
+      permissionStream = await navigator.mediaDevices.getUserMedia({ video: selectedVideoConstraint(), audio: false });
+    }
+    if (run !== hardwareDetectionRun) return;
+
+    const videoTrack = permissionStream.getVideoTracks()[0];
+    const audioTrack = permissionStream.getAudioTracks()[0];
+    if (videoTrack) {
+      const settings = typeof videoTrack.getSettings === 'function' ? videoTrack.getSettings() : {};
+      selectedVideoDeviceId = settings.deviceId || selectedVideoDeviceId;
+      selectedVideoDeviceLabel = videoTrack.label || selectedVideoDeviceLabel;
+      webcamSupport = supportFromTrack(videoTrack);
+    }
+    if (audioTrack) {
+      const settings = typeof audioTrack.getSettings === 'function' ? audioTrack.getSettings() : {};
+      selectedAudioDeviceId = settings.deviceId || selectedAudioDeviceId;
+      selectedAudioDeviceLabel = audioTrack.label || selectedAudioDeviceLabel;
+    }
+
+    await refreshDeviceLists();
+    if (run !== hardwareDetectionRun) return;
+    renderDeviceSelects();
+    updateDeviceStatus();
+  } catch (error) {
+    if (run !== hardwareDetectionRun) return;
+    webcamSupport = null;
+    await refreshDeviceLists().catch(() => {});
+    if (run !== hardwareDetectionRun) return;
+    renderDeviceSelects();
+    setDeviceStatus('Could not detect webcam quality: ' + (error.message || String(error)) + '. You can still try joining with a lower setting.', true);
+  } finally {
+    stopStream(permissionStream);
+    if (run === hardwareDetectionRun) {
+      hardwareDetectionInProgress = false;
+      renderQualityOptions();
+      renderFrameRateOptions();
+      updateJoinAvailability();
+    }
+  }
+}
+
+async function detectSelectedCameraHardware() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
+  const run = ++hardwareDetectionRun;
+  hardwareDetectionInProgress = true;
+  $('join-button').disabled = true;
+  webcamSupport = null;
+  setDeviceStatus('Checking selected webcam hardware...', false);
+  let stream = null;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: selectedVideoConstraint(), audio: false });
+    if (run !== hardwareDetectionRun) return;
+    const videoTrack = stream.getVideoTracks()[0];
+    if (!videoTrack) throw new Error('No video track returned by the selected camera');
+    const settings = typeof videoTrack.getSettings === 'function' ? videoTrack.getSettings() : {};
+    selectedVideoDeviceId = settings.deviceId || selectedVideoDeviceId;
+    selectedVideoDeviceLabel = videoTrack.label || selectedVideoDeviceLabel;
+    webcamSupport = supportFromTrack(videoTrack);
+    await refreshDeviceLists();
+    if (run !== hardwareDetectionRun) return;
+    renderDeviceSelects();
+    updateDeviceStatus();
+  } catch (error) {
+    if (run !== hardwareDetectionRun) return;
+    setDeviceStatus('Could not check selected webcam: ' + (error.message || String(error)) + '. Options are left enabled until the browser reports limits.', true);
+  } finally {
+    stopStream(stream);
+    if (run === hardwareDetectionRun) {
+      hardwareDetectionInProgress = false;
+      renderQualityOptions();
+      renderFrameRateOptions();
+      updateJoinAvailability();
+    }
+  }
+}
+
+function qualityOrder() {
+  return Object.values(qualityPresets).slice().sort((a, b) => (a.width * a.height) - (b.width * b.height));
+}
+
+function isQualityUnsupported(quality) {
+  if (!webcamSupport || !webcamSupport.hasMaximums) return false;
+  return Boolean(
+    (webcamSupport.maxWidth && quality.width > webcamSupport.maxWidth) ||
+    (webcamSupport.maxHeight && quality.height > webcamSupport.maxHeight)
+  );
+}
+
+function isFrameRateUnsupported(frameRate) {
+  if (!webcamSupport || !webcamSupport.hasMaximums || !webcamSupport.maxFrameRate) return false;
+  return frameRate > webcamSupport.maxFrameRate + 0.5;
+}
+
+function optionWarningForQuality(quality) {
+  if (!isQualityUnsupported(quality)) return '';
+  const width = webcamSupport.maxWidth ? Math.round(webcamSupport.maxWidth) : '?';
+  const height = webcamSupport.maxHeight ? Math.round(webcamSupport.maxHeight) : '?';
+  return 'Above detected webcam max ' + width + 'x' + height;
+}
+
+function optionWarningForFrameRate(frameRate) {
+  if (!isFrameRateUnsupported(frameRate)) return '';
+  return 'Above detected webcam max ' + Math.round(webcamSupport.maxFrameRate) + ' FPS';
+}
+
+function chooseSupportedSelections() {
+  const qualities = qualityOrder();
+  const supportedQualities = qualities.filter((quality) => !isQualityUnsupported(quality));
+  if (!qualityPresets[selectedQuality] || isQualityUnsupported(qualityPresets[selectedQuality])) {
+    const medium = supportedQualities.find((quality) => quality.id === 'medium');
+    selectedQuality = (medium || supportedQualities[supportedQualities.length - 1] || qualities[0] || { id: 'medium' }).id;
+  }
+
+  const supportedFrameRates = frameRatePresets.filter((preset) => !isFrameRateUnsupported(preset.frameRate));
+  if (!frameRatePresets.some((preset) => preset.frameRate === selectedFrameRate) || isFrameRateUnsupported(selectedFrameRate)) {
+    const thirty = supportedFrameRates.find((preset) => preset.frameRate === 30);
+    selectedFrameRate = (thirty || supportedFrameRates[supportedFrameRates.length - 1] || frameRatePresets[0] || { frameRate: 30 }).frameRate;
+  }
+}
+
+function updateDeviceStatus() {
+  if (!webcamSupport) {
+    setDeviceStatus('Webcam limits are not detected yet. Options above hardware limits cannot be disabled until detection completes.', true);
+    return;
+  }
+
+  const hasResolutionMaximum = Boolean(webcamSupport.maxWidth || webcamSupport.maxHeight);
+  const bestQuality = hasResolutionMaximum ? qualityOrder().filter((quality) => !isQualityUnsupported(quality)).pop() : null;
+  const maxResolution = hasResolutionMaximum
+    ? (webcamSupport.maxWidth ? Math.round(webcamSupport.maxWidth) : '?') + 'x' + (webcamSupport.maxHeight ? Math.round(webcamSupport.maxHeight) : '?')
+    : 'unknown resolution';
+  const maxFps = webcamSupport.maxFrameRate ? Math.round(webcamSupport.maxFrameRate) + ' FPS' : 'unknown FPS';
+  const qualityText = hasResolutionMaximum ? (bestQuality ? bestQuality.label : 'below the listed presets') : 'unknown';
+  const limitedOptions = Object.values(qualityPresets).some(isQualityUnsupported) || frameRatePresets.some((preset) => isFrameRateUnsupported(preset.frameRate));
+  let message = 'Detected webcam quality: ' + qualityText + '. Max supported: ' + maxResolution + ' @ ' + maxFps + '.';
+  const currentStream = [];
+  if (webcamSupport.currentWidth && webcamSupport.currentHeight) currentStream.push(webcamSupport.currentWidth + 'x' + webcamSupport.currentHeight);
+  if (webcamSupport.currentFrameRate) currentStream.push(webcamSupport.currentFrameRate + ' FPS');
+  if (currentStream.length && (!hasResolutionMaximum || !webcamSupport.maxFrameRate)) message += ' Current detected stream: ' + currentStream.join(' @ ') + '.';
+  if (webcamSupport.label) message = webcamSupport.label + ' · ' + message;
+  if (limitedOptions) message += ' Options above this hardware are disabled.';
+  if (!webcamSupport.hasMaximums) message += ' Browser did not expose exact maximums, so choices may still be limited by the camera.';
+  setDeviceStatus(message, limitedOptions || !webcamSupport.hasMaximums);
+}
+
+function updateJoinAvailability() {
+  if (hardwareDetectionInProgress) return;
+  const preset = qualityPresets[selectedQuality];
+  const selectedUnsupported = (preset && isQualityUnsupported(preset)) || isFrameRateUnsupported(selectedFrameRate);
+  $('join-button').disabled = Boolean(selectedUnsupported);
+}
+
+function renderQualityOptions() {
+  chooseSupportedSelections();
+  const container = $('quality-options');
+  container.innerHTML = '';
+  for (const quality of Object.values(qualityPresets)) {
+    const unsupported = isQualityUnsupported(quality);
+    const label = document.createElement('label');
+    label.className = 'radio-card' + (unsupported ? ' unsupported' : '');
+    const warning = optionWarningForQuality(quality);
+    label.innerHTML = '<input type="radio" name="quality" />' +
+      '<span class="option-copy"><strong></strong><span class="option-meta"></span><span class="option-warning"></span></span>';
+    const input = label.querySelector('input');
+    input.value = quality.id;
+    input.checked = quality.id === selectedQuality;
+    input.disabled = unsupported;
+    label.querySelector('strong').textContent = quality.label;
+    label.querySelector('.option-meta').textContent = quality.width + 'x' + quality.height;
+    label.querySelector('.option-warning').textContent = warning;
+    input.addEventListener('change', () => {
+      selectedQuality = input.value;
+      updateJoinAvailability();
+    });
+    container.appendChild(label);
+  }
+}
+
+function renderFrameRateOptions() {
+  chooseSupportedSelections();
+  const container = $('frame-rate-options');
+  container.innerHTML = '';
+  for (const frameRatePreset of frameRatePresets) {
+    const unsupported = isFrameRateUnsupported(frameRatePreset.frameRate);
+    const label = document.createElement('label');
+    label.className = 'radio-card' + (unsupported ? ' unsupported' : '');
+    const warning = optionWarningForFrameRate(frameRatePreset.frameRate);
+    label.innerHTML = '<input type="radio" name="frame-rate" />' +
+      '<span class="option-copy"><strong></strong><span class="option-meta"></span><span class="option-warning"></span></span>';
+    const input = label.querySelector('input');
+    input.value = String(frameRatePreset.frameRate);
+    input.checked = frameRatePreset.frameRate === selectedFrameRate;
+    input.disabled = unsupported;
+    label.querySelector('strong').textContent = frameRatePreset.label;
+    label.querySelector('.option-meta').textContent = frameRatePreset.frameRate + ' frames per second';
+    label.querySelector('.option-warning').textContent = warning;
+    input.addEventListener('change', () => {
+      selectedFrameRate = Number(input.value) || 30;
+      updateJoinAvailability();
+    });
+    container.appendChild(label);
   }
 }
 
 async function joinCall() {
   clearError();
-  selectedQuality = $('quality-select').value || 'medium';
-  selectedFrameRate = Number($('frame-rate-select').value) || 30;
+  const checkedQuality = document.querySelector('input[name="quality"]:checked');
+  const checkedFrameRate = document.querySelector('input[name="frame-rate"]:checked');
+  selectedQuality = checkedQuality ? checkedQuality.value : selectedQuality || 'medium';
+  selectedFrameRate = checkedFrameRate ? Number(checkedFrameRate.value) || 30 : selectedFrameRate;
+  updateSelectedDevicesFromSelects();
   const preset = qualityPresets[selectedQuality];
   if (!preset) throw new Error('Unknown recording quality');
+  if (isQualityUnsupported(preset) || isFrameRateUnsupported(selectedFrameRate)) {
+    throw new Error('Selected resolution or FPS is above the detected webcam hardware. Choose an enabled option.');
+  }
 
   $('join-button').disabled = true;
   $('join-button').textContent = 'Requesting camera...';
 
+  const audioConstraints = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+  if (selectedAudioDeviceId) audioConstraints.deviceId = { exact: selectedAudioDeviceId };
+  const videoConstraints = {
+    width: { ideal: preset.width },
+    height: { ideal: preset.height },
+    frameRate: { ideal: selectedFrameRate, max: selectedFrameRate },
+  };
+  if (selectedVideoDeviceId) videoConstraints.deviceId = { exact: selectedVideoDeviceId };
+
   localStream = await navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-    video: {
-      width: { ideal: preset.width },
-      height: { ideal: preset.height },
-      frameRate: { ideal: selectedFrameRate, max: selectedFrameRate },
-    },
+    audio: audioConstraints,
+    video: videoConstraints,
   });
+  const videoTrack = localStream.getVideoTracks()[0];
+  if (videoTrack) {
+    const settings = typeof videoTrack.getSettings === 'function' ? videoTrack.getSettings() : {};
+    selectedVideoDeviceId = settings.deviceId || selectedVideoDeviceId;
+    selectedVideoDeviceLabel = videoTrack.label || selectedVideoDeviceLabel;
+    webcamSupport = supportFromTrack(videoTrack);
+    updateDeviceStatus();
+  }
   $('local-video').srcObject = localStream;
 
   const joinData = await api('/api/rooms/' + window.ROOM_ID + '/join', {
@@ -681,7 +1069,23 @@ async function leaveCall() {
   window.location.href = '/';
 }
 
-$('join-button').addEventListener('click', () => joinCall().catch((error) => { $('join-button').disabled = false; $('join-button').textContent = 'Join with camera and microphone'; showError(error); }));
+$('camera-select').addEventListener('change', () => {
+  updateSelectedDevicesFromSelects();
+  detectSelectedCameraHardware().catch(showError);
+});
+$('microphone-select').addEventListener('change', () => {
+  updateSelectedDevicesFromSelects();
+});
+if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+  navigator.mediaDevices.addEventListener('devicechange', () => {
+    if (localStream) return;
+    refreshDeviceLists().then(() => {
+      renderDeviceSelects();
+      return detectSelectedCameraHardware();
+    }).catch(showError);
+  });
+}
+$('join-button').addEventListener('click', () => joinCall().catch((error) => { $('join-button').disabled = false; $('join-button').textContent = 'Join with camera and microphone'; updateJoinAvailability(); showError(error); }));
 $('start-recording').addEventListener('click', () => startRecording().catch(showError));
 $('stop-recording').addEventListener('click', () => stopRecording().catch(showError));
 $('leave-button').addEventListener('click', () => leaveCall().catch(showError));
