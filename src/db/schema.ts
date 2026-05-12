@@ -61,7 +61,9 @@ export const recordings = sqliteTable(
     userId: text("user_id")
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
-    quality: text("quality", { enum: ["low", "medium", "high", "2k", "ultra"] }).notNull(),
+    quality: text("quality", {
+      enum: ["low", "medium", "high", "2k", "ultra"],
+    }).notNull(),
     frameRate: integer("frame_rate").notNull().default(30),
     mimeType: text("mime_type").notNull(),
     status: text("status", {
@@ -97,10 +99,9 @@ export const recordingChunks = sqliteTable(
     uploadedAt: integer("uploaded_at", { mode: "timestamp" }).notNull(),
   },
   (table) => ({
-    recordingChunkIdx: uniqueIndex("recording_chunks_recording_index_unique").on(
-      table.recordingId,
-      table.chunkIndex,
-    ),
+    recordingChunkIdx: uniqueIndex(
+      "recording_chunks_recording_index_unique",
+    ).on(table.recordingId, table.chunkIndex),
     recordingIdx: index("recording_chunks_recording_id_idx").on(
       table.recordingId,
     ),
@@ -128,22 +129,28 @@ export const recordingRelations = relations(recordings, ({ one, many }) => ({
   chunks: many(recordingChunks),
 }));
 
-export const recordingChunkRelations = relations(recordingChunks, ({ one }) => ({
-  recording: one(recordings, {
-    fields: [recordingChunks.recordingId],
-    references: [recordings.id],
+export const recordingChunkRelations = relations(
+  recordingChunks,
+  ({ one }) => ({
+    recording: one(recordings, {
+      fields: [recordingChunks.recordingId],
+      references: [recordings.id],
+    }),
   }),
-}));
+);
 
-export const roomParticipantRelations = relations(roomParticipants, ({ one }) => ({
-  room: one(rooms, {
-    fields: [roomParticipants.roomId],
-    references: [rooms.id],
+export const roomParticipantRelations = relations(
+  roomParticipants,
+  ({ one }) => ({
+    room: one(rooms, {
+      fields: [roomParticipants.roomId],
+      references: [rooms.id],
+    }),
+    user: one(user, {
+      fields: [roomParticipants.userId],
+      references: [user.id],
+    }),
   }),
-  user: one(user, {
-    fields: [roomParticipants.userId],
-    references: [user.id],
-  }),
-}));
+);
 
 export const nowSql = sql`(unixepoch())`;

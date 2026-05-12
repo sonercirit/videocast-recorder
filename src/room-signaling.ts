@@ -60,7 +60,10 @@ export class RoomSignaling {
     const cleanup = () => {
       if (!this.sessions.has(participant.id)) return;
       this.sessions.delete(participant.id);
-      this.broadcast({ type: "participant-left", participantId: participant.id });
+      this.broadcast({
+        type: "participant-left",
+        participantId: participant.id,
+      });
     };
 
     server.addEventListener("message", (event) => {
@@ -68,7 +71,10 @@ export class RoomSignaling {
         const message = JSON.parse(String(event.data)) as ClientSignal;
         this.handleClientMessage(participant, message);
       } catch {
-        this.send(server, { type: "error", message: "Invalid signaling message" });
+        this.send(server, {
+          type: "error",
+          message: "Invalid signaling message",
+        });
       }
     });
 

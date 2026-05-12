@@ -291,75 +291,97 @@ app.post("/api/rooms/:roomId/recordings/start", async (c) => {
   return c.json({ recording }, 201);
 });
 
-app.put("/api/rooms/:roomId/recordings/:recordingId/chunks/:chunkIndex", async (c) => {
-  const auth = await getSession(c);
-  if (!auth) return c.json({ error: "Unauthorized" }, 401);
+app.put(
+  "/api/rooms/:roomId/recordings/:recordingId/chunks/:chunkIndex",
+  async (c) => {
+    const auth = await getSession(c);
+    if (!auth) return c.json({ error: "Unauthorized" }, 401);
 
-  const chunkIndex = Number.parseInt(c.req.param("chunkIndex"), 10);
-  if (!Number.isInteger(chunkIndex) || chunkIndex < 0) {
-    return c.json({ error: "Invalid chunk index" }, 400);
-  }
+    const chunkIndex = Number.parseInt(c.req.param("chunkIndex"), 10);
+    if (!Number.isInteger(chunkIndex) || chunkIndex < 0) {
+      return c.json({ error: "Invalid chunk index" }, 400);
+    }
 
-  const recording = await getRecording(c.get("db"), c.req.param("recordingId"), c.req.param("roomId"));
-  if (!recording) return c.json({ error: "Recording not found" }, 404);
-  if (recording.userId !== auth.user.id) return c.json({ error: "Forbidden" }, 403);
-  if (recording.status !== "recording") return c.json({ error: "Recording is not accepting chunks" }, 409);
-  if (!c.req.raw.body) return c.json({ error: "Missing chunk body" }, 400);
+    const recording = await getRecording(
+      c.get("db"),
+      c.req.param("recordingId"),
+      c.req.param("roomId"),
+    );
+    if (!recording) return c.json({ error: "Recording not found" }, 404);
+    if (recording.userId !== auth.user.id)
+      return c.json({ error: "Forbidden" }, 403);
+    if (recording.status !== "recording")
+      return c.json({ error: "Recording is not accepting chunks" }, 409);
+    if (!c.req.raw.body) return c.json({ error: "Missing chunk body" }, 400);
 
-  const extension = extensionForMime(recording.mimeType);
-  const r2Key = `${recording.r2Prefix}/chunks/${String(chunkIndex).padStart(6, "0")}.${extension}`;
-  const byteLengthHeader = c.req.header("x-byte-length") ?? c.req.header("content-length") ?? "0";
-  const byteLength = Number.isFinite(Number(byteLengthHeader)) ? Number(byteLengthHeader) : 0;
+    const extension = extensionForMime(recording.mimeType);
+    const r2Key = `${recording.r2Prefix}/chunks/${String(chunkIndex).padStart(6, "0")}.${extension}`;
+    const byteLengthHeader =
+      c.req.header("x-byte-length") ?? c.req.header("content-length") ?? "0";
+    const byteLength = Number.isFinite(Number(byteLengthHeader))
+      ? Number(byteLengthHeader)
+      : 0;
 
-  await c.env.RECORDINGS.put(r2Key, c.req.raw.body, {
-    httpMetadata: { contentType: c.req.header("content-type") ?? recording.mimeType },
-    customMetadata: {
-      roomId: recording.roomId,
-      recordingId: recording.id,
-      userId: auth.user.id,
-      chunkIndex: String(chunkIndex),
-      quality: recording.quality,
-      frameRate: String(recording.frameRate),
-    },
-  });
-
-  const uploadedAt = new Date();
-  const chunk = {
-    id: newId("chunk"),
-    recordingId: recording.id,
-    chunkIndex,
-    r2Key,
-    byteLength,
-    uploadedAt,
-  };
-
-  await c
-    .get("db")
-    .insert(schema.recordingChunks)
-    .values(chunk)
-    .onConflictDoUpdate({
-      target: [schema.recordingChunks.recordingId, schema.recordingChunks.chunkIndex],
-      set: { r2Key, byteLength, uploadedAt },
+    await c.env.RECORDINGS.put(r2Key, c.req.raw.body, {
+      httpMetadata: {
+        contentType: c.req.header("content-type") ?? recording.mimeType,
+      },
+      customMetadata: {
+        roomId: recording.roomId,
+        recordingId: recording.id,
+        userId: auth.user.id,
+        chunkIndex: String(chunkIndex),
+        quality: recording.quality,
+        frameRate: String(recording.frameRate),
+      },
     });
 
-  if (chunkIndex + 1 > recording.chunkCount) {
+    const uploadedAt = new Date();
+    const chunk = {
+      id: newId("chunk"),
+      recordingId: recording.id,
+      chunkIndex,
+      r2Key,
+      byteLength,
+      uploadedAt,
+    };
+
     await c
       .get("db")
-      .update(schema.recordings)
-      .set({ chunkCount: chunkIndex + 1, updatedAt: uploadedAt })
-      .where(eq(schema.recordings.id, recording.id));
-  }
+      .insert(schema.recordingChunks)
+      .values(chunk)
+      .onConflictDoUpdate({
+        target: [
+          schema.recordingChunks.recordingId,
+          schema.recordingChunks.chunkIndex,
+        ],
+        set: { r2Key, byteLength, uploadedAt },
+      });
 
-  return c.json({ chunk: { index: chunkIndex, r2Key, byteLength } });
-});
+    if (chunkIndex + 1 > recording.chunkCount) {
+      await c
+        .get("db")
+        .update(schema.recordings)
+        .set({ chunkCount: chunkIndex + 1, updatedAt: uploadedAt })
+        .where(eq(schema.recordings.id, recording.id));
+    }
+
+    return c.json({ chunk: { index: chunkIndex, r2Key, byteLength } });
+  },
+);
 
 app.post("/api/rooms/:roomId/recordings/:recordingId/complete", async (c) => {
   const auth = await getSession(c);
   if (!auth) return c.json({ error: "Unauthorized" }, 401);
 
-  const recording = await getRecording(c.get("db"), c.req.param("recordingId"), c.req.param("roomId"));
+  const recording = await getRecording(
+    c.get("db"),
+    c.req.param("recordingId"),
+    c.req.param("roomId"),
+  );
   if (!recording) return c.json({ error: "Recording not found" }, 404);
-  if (recording.userId !== auth.user.id) return c.json({ error: "Forbidden" }, 403);
+  if (recording.userId !== auth.user.id)
+    return c.json({ error: "Forbidden" }, 403);
 
   const input = await parseJson(c, completeRecordingSchema);
   if (!input.success) return c.json({ error: input.error }, 400);
@@ -410,7 +432,10 @@ app.post("/api/rooms/:roomId/recordings/:recordingId/complete", async (c) => {
     })
     .where(eq(schema.recordings.id, recording.id));
 
-  return c.json({ ok: true, manifestKey: `${recording.r2Prefix}/manifest.json` });
+  return c.json({
+    ok: true,
+    manifestKey: `${recording.r2Prefix}/manifest.json`,
+  });
 });
 
 app.get("/api/rooms/:roomId/recordings", async (c) => {
@@ -424,7 +449,10 @@ app.get("/api/rooms/:roomId/recordings", async (c) => {
   const where =
     room.ownerUserId === auth.user.id
       ? eq(schema.recordings.roomId, roomId)
-      : and(eq(schema.recordings.roomId, roomId), eq(schema.recordings.userId, auth.user.id));
+      : and(
+          eq(schema.recordings.roomId, roomId),
+          eq(schema.recordings.userId, auth.user.id),
+        );
 
   const recordings = await c
     .get("db")
@@ -460,7 +488,8 @@ app.get("/api/recordings/:recordingId/download", async (c) => {
     .where(eq(schema.recordingChunks.recordingId, recording.id))
     .orderBy(asc(schema.recordingChunks.chunkIndex));
 
-  if (!chunks.length) return c.json({ error: "Recording has no uploaded chunks" }, 404);
+  if (!chunks.length)
+    return c.json({ error: "Recording has no uploaded chunks" }, 404);
 
   const headers = new Headers();
   headers.set("content-type", recording.mimeType || "application/octet-stream");
@@ -477,7 +506,9 @@ app.get("/api/recordings/:recordingId/download", async (c) => {
     headers.set("content-length", String(totalBytes));
   }
 
-  return new Response(createRecordingDownloadStream(c.env.RECORDINGS, chunks), { headers });
+  return new Response(createRecordingDownloadStream(c.env.RECORDINGS, chunks), {
+    headers,
+  });
 });
 
 app.get("/api/recordings/:recordingId/chunks/:chunkIndex", async (c) => {
@@ -524,8 +555,12 @@ app.get("/api/recordings/:recordingId/chunks/:chunkIndex", async (c) => {
 
 app.notFound((c) => c.json({ error: "Not found" }, 404));
 
-async function getSession(c: AppContext): Promise<{ user: any; session: any } | null> {
-  return c.get("auth").api.getSession({ headers: c.req.raw.headers }) as Promise<{
+async function getSession(
+  c: AppContext,
+): Promise<{ user: any; session: any } | null> {
+  return c
+    .get("auth")
+    .api.getSession({ headers: c.req.raw.headers }) as Promise<{
     user: any;
     session: any;
   } | null>;
@@ -535,32 +570,53 @@ async function parseJson<T extends z.ZodTypeAny>(
   c: AppContext,
   parser: T,
   fallback?: unknown,
-): Promise<{ success: true; data: z.infer<T> } | { success: false; error: string }> {
+): Promise<
+  { success: true; data: z.infer<T> } | { success: false; error: string }
+> {
   let body: unknown;
   try {
     body = await c.req.json();
   } catch {
-    if (fallback === undefined) return { success: false, error: "Expected JSON body" };
+    if (fallback === undefined)
+      return { success: false, error: "Expected JSON body" };
     body = fallback;
   }
 
   const parsed = parser.safeParse(body);
   if (!parsed.success) {
-    return { success: false, error: parsed.error.issues.map((issue) => issue.message).join(", ") };
+    return {
+      success: false,
+      error: parsed.error.issues.map((issue) => issue.message).join(", "),
+    };
   }
   return { success: true, data: parsed.data };
 }
 
 async function getRoom(db: Database, roomId: string) {
-  const [room] = await db.select().from(schema.rooms).where(eq(schema.rooms.id, roomId)).limit(1);
+  const [room] = await db
+    .select()
+    .from(schema.rooms)
+    .where(eq(schema.rooms.id, roomId))
+    .limit(1);
   return room ?? null;
 }
 
-async function getRecording(db: Database, recordingId: string, roomId?: string) {
+async function getRecording(
+  db: Database,
+  recordingId: string,
+  roomId?: string,
+) {
   const where = roomId
-    ? and(eq(schema.recordings.id, recordingId), eq(schema.recordings.roomId, roomId))
+    ? and(
+        eq(schema.recordings.id, recordingId),
+        eq(schema.recordings.roomId, roomId),
+      )
     : eq(schema.recordings.id, recordingId);
-  const [recording] = await db.select().from(schema.recordings).where(where).limit(1);
+  const [recording] = await db
+    .select()
+    .from(schema.recordings)
+    .where(where)
+    .limit(1);
   return recording ?? null;
 }
 
@@ -585,7 +641,11 @@ function extensionForMime(mimeType: string) {
   return "webm";
 }
 
-function downloadFileName(roomName: string, recordingId: string, mimeType: string) {
+function downloadFileName(
+  roomName: string,
+  recordingId: string,
+  mimeType: string,
+) {
   const safeRecordingId = recordingId.replace(/[^a-zA-Z0-9_-]/g, "");
   return `${slugify(roomName)}-${safeRecordingId}.${extensionForMime(mimeType)}`;
 }
@@ -609,7 +669,9 @@ function createRecordingDownloadStream(
           const chunk = chunks[chunkPosition];
           const object = await bucket.get(chunk.r2Key);
           if (!object?.body) {
-            controller.error(new Error(`Missing recording chunk ${chunk.chunkIndex}`));
+            controller.error(
+              new Error(`Missing recording chunk ${chunk.chunkIndex}`),
+            );
             return;
           }
           reader = object.body.getReader();
