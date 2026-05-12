@@ -1,0 +1,1 @@
+ALTER TABLE `recordings` ADD `frame_rate` integer DEFAULT 30 NOT NULL;

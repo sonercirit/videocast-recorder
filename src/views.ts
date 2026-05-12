@@ -245,9 +245,10 @@ export function roomPage(roomId: string) {
 
   <div id="join-panel" class="card stack">
     <h2>Join videocast</h2>
-    <p class="muted">Pick the camera quality used for your local recording. Higher quality creates larger R2 uploads.</p>
+    <p class="muted">Pick the camera quality and frame rate used for your local recording. Higher settings create larger R2 uploads.</p>
     <div class="grid">
       <label>Local recording quality <select id="quality-select"></select></label>
+      <label>Frame rate <select id="frame-rate-select"></select></label>
       <label class="checkbox"><input id="auto-record" type="checkbox" checked /> Start local recording in the background when I join</label>
     </div>
     <button id="join-button">Join with camera and microphone</button>
@@ -289,7 +290,9 @@ const $ = (id) => document.getElementById(id);
 let me = null;
 let room = null;
 let qualityPresets = {};
+let frameRatePresets = [];
 let selectedQuality = 'medium';
+let selectedFrameRate = 30;
 let localStream = null;
 let ws = null;
 let participantId = null;
@@ -357,7 +360,9 @@ async function init() {
 
     const qualityData = await api('/api/recording-qualities');
     qualityPresets = qualityData.qualities;
+    frameRatePresets = qualityData.frameRates || [{ id: '30', label: '30 FPS', frameRate: 30 }];
     renderQualitySelect();
+    renderFrameRateSelect();
     await loadRecordings();
   } catch (error) {
     showError(error);
@@ -371,8 +376,20 @@ function renderQualitySelect() {
   for (const quality of Object.values(qualityPresets)) {
     const option = document.createElement('option');
     option.value = quality.id;
-    option.textContent = quality.label + ' · ' + quality.width + 'x' + quality.height + ' @ ' + quality.frameRate + 'fps';
+    option.textContent = quality.label + ' · ' + quality.width + 'x' + quality.height;
     if (quality.id === 'medium') option.selected = true;
+    select.appendChild(option);
+  }
+}
+
+function renderFrameRateSelect() {
+  const select = $('frame-rate-select');
+  select.innerHTML = '';
+  for (const frameRatePreset of frameRatePresets) {
+    const option = document.createElement('option');
+    option.value = String(frameRatePreset.frameRate);
+    option.textContent = frameRatePreset.label;
+    if (frameRatePreset.frameRate === 30) option.selected = true;
     select.appendChild(option);
   }
 }
@@ -380,6 +397,7 @@ function renderQualitySelect() {
 async function joinCall() {
   clearError();
   selectedQuality = $('quality-select').value || 'medium';
+  selectedFrameRate = Number($('frame-rate-select').value) || 30;
   const preset = qualityPresets[selectedQuality];
   if (!preset) throw new Error('Unknown recording quality');
 
@@ -391,7 +409,7 @@ async function joinCall() {
     video: {
       width: { ideal: preset.width },
       height: { ideal: preset.height },
-      frameRate: { ideal: preset.frameRate, max: preset.frameRate },
+      frameRate: { ideal: selectedFrameRate, max: selectedFrameRate },
     },
   });
   $('local-video').srcObject = localStream;
@@ -536,6 +554,10 @@ function supportedMimeType() {
   return candidates.find((type) => MediaRecorder.isTypeSupported(type)) || '';
 }
 
+function videoBitsPerSecondFor(preset, frameRate) {
+  return Math.round(preset.videoBitsPerSecond * (frameRate / 30));
+}
+
 async function startRecording() {
   if (!localStream) throw new Error('Join the call before recording');
   if (mediaRecorder && mediaRecorder.state !== 'inactive') return;
@@ -543,7 +565,7 @@ async function startRecording() {
   const mimeType = supportedMimeType() || 'video/webm';
   const startData = await api('/api/rooms/' + window.ROOM_ID + '/recordings/start', {
     method: 'POST',
-    body: { quality: selectedQuality, mimeType },
+    body: { quality: selectedQuality, frameRate: selectedFrameRate, mimeType },
   });
 
   currentRecordingId = startData.recording.id;
@@ -554,7 +576,7 @@ async function startRecording() {
 
   const preset = qualityPresets[selectedQuality];
   const options = {
-    videoBitsPerSecond: preset.videoBitsPerSecond,
+    videoBitsPerSecond: videoBitsPerSecondFor(preset, selectedFrameRate),
     audioBitsPerSecond: preset.audioBitsPerSecond,
   };
   if (mimeType) options.mimeType = mimeType;
@@ -633,7 +655,9 @@ async function loadRecordings() {
     item.className = 'recording-item';
     const duration = recording.durationMs ? Math.round(recording.durationMs / 1000) + 's' : 'in progress';
     item.innerHTML = '<div class="row spread"><strong></strong><div class="row"><a class="pill download-link hidden">Download</a><span class="pill status-pill"></span></div></div><div class="muted small"></div>';
-    item.querySelector('strong').textContent = recording.quality + ' local recording';
+    const quality = qualityPresets[recording.quality];
+    const frameRate = recording.frameRate || 30;
+    item.querySelector('strong').textContent = (quality ? quality.label : recording.quality) + ' · ' + frameRate + ' FPS local recording';
     item.querySelector('.status-pill').textContent = recording.status;
     item.querySelector('.muted').textContent = recording.chunkCount + ' chunks · ' + duration + ' · ' + recording.mimeType;
     const downloadLink = item.querySelector('.download-link');

@@ -61,7 +61,8 @@ export const recordings = sqliteTable(
     userId: text("user_id")
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
-    quality: text("quality", { enum: ["low", "medium", "high"] }).notNull(),
+    quality: text("quality", { enum: ["low", "medium", "high", "2k", "ultra"] }).notNull(),
+    frameRate: integer("frame_rate").notNull().default(30),
     mimeType: text("mime_type").notNull(),
     status: text("status", {
       enum: ["recording", "completed", "failed"],

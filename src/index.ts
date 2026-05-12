@@ -31,14 +31,14 @@ type AppContext = Context<AppBindings>;
 
 const app = new Hono<AppBindings>();
 
-const qualitySchema = z.enum(["low", "medium", "high"]);
+const qualitySchema = z.enum(["low", "medium", "high", "2k", "ultra"]);
+const frameRateSchema = z.union([z.literal(24), z.literal(30), z.literal(60)]);
 const recordingQualities = {
   low: {
     id: "low",
     label: "Low",
     width: 640,
     height: 360,
-    frameRate: 24,
     videoBitsPerSecond: 750_000,
     audioBitsPerSecond: 64_000,
   },
@@ -47,7 +47,6 @@ const recordingQualities = {
     label: "Medium",
     width: 1280,
     height: 720,
-    frameRate: 30,
     videoBitsPerSecond: 2_500_000,
     audioBitsPerSecond: 96_000,
   },
@@ -56,11 +55,31 @@ const recordingQualities = {
     label: "High",
     width: 1920,
     height: 1080,
-    frameRate: 30,
     videoBitsPerSecond: 5_000_000,
     audioBitsPerSecond: 128_000,
   },
+  "2k": {
+    id: "2k",
+    label: "2K",
+    width: 2560,
+    height: 1440,
+    videoBitsPerSecond: 10_000_000,
+    audioBitsPerSecond: 160_000,
+  },
+  ultra: {
+    id: "ultra",
+    label: "Ultra 4K",
+    width: 3840,
+    height: 2160,
+    videoBitsPerSecond: 17_500_000,
+    audioBitsPerSecond: 192_000,
+  },
 } as const;
+const recordingFrameRates = [
+  { id: "24", label: "24 FPS", frameRate: 24 },
+  { id: "30", label: "30 FPS", frameRate: 30 },
+  { id: "60", label: "60 FPS", frameRate: 60 },
+] as const;
 
 const createRoomSchema = z.object({
   name: z.string().trim().min(1).max(80),
@@ -72,6 +91,7 @@ const joinRoomSchema = z.object({
 
 const startRecordingSchema = z.object({
   quality: qualitySchema,
+  frameRate: frameRateSchema.default(30),
   mimeType: z.string().trim().min(1).max(120),
 });
 
@@ -93,7 +113,9 @@ app.get("/", (c) => c.html(homePage()));
 app.get("/rooms/:roomId", (c) => c.html(roomPage(c.req.param("roomId"))));
 app.get("/health", (c) => c.json({ ok: true }));
 
-app.get("/api/recording-qualities", (c) => c.json({ qualities: recordingQualities }));
+app.get("/api/recording-qualities", (c) =>
+  c.json({ qualities: recordingQualities, frameRates: recordingFrameRates }),
+);
 
 app.get("/api/me", async (c) => {
   const auth = await getSession(c);
@@ -253,6 +275,7 @@ app.post("/api/rooms/:roomId/recordings/start", async (c) => {
     roomId,
     userId: auth.user.id,
     quality: input.data.quality,
+    frameRate: input.data.frameRate,
     mimeType: input.data.mimeType,
     status: "recording" as const,
     r2Prefix: `rooms/${roomId}/recordings/${recordingId}`,
@@ -296,6 +319,7 @@ app.put("/api/rooms/:roomId/recordings/:recordingId/chunks/:chunkIndex", async (
       userId: auth.user.id,
       chunkIndex: String(chunkIndex),
       quality: recording.quality,
+      frameRate: String(recording.frameRate),
     },
   });
 
@@ -357,6 +381,7 @@ app.post("/api/rooms/:roomId/recordings/:recordingId/complete", async (c) => {
         roomId: recording.roomId,
         userId: recording.userId,
         quality: recording.quality,
+        frameRate: recording.frameRate,
         mimeType: recording.mimeType,
         durationMs: input.data.durationMs,
         chunkCount,
