@@ -1,7 +1,13 @@
+type MediaState = {
+  audioEnabled: boolean;
+  videoEnabled: boolean;
+};
+
 type SignalParticipant = {
   id: string;
   userId: string;
   displayName: string;
+  mediaState: MediaState;
 };
 
 type SignalSession = SignalParticipant & {
@@ -38,6 +44,7 @@ export class RoomSignaling {
         crypto.randomUUID(),
       userId: request.headers.get("x-user-id") ?? "unknown",
       displayName: request.headers.get("x-user-name") ?? "Guest",
+      mediaState: { audioEnabled: true, videoEnabled: true },
     };
 
     server.accept();
@@ -100,21 +107,38 @@ export class RoomSignaling {
     }
 
     if (message.type === "media-state") {
+      const mediaState = this.normalizeMediaState(message.data);
+      const session = this.sessions.get(from.id);
+      if (session) session.mediaState = mediaState;
       this.broadcast(
         {
           type: "media-state",
           participantId: from.id,
-          data: message.data,
+          data: mediaState,
         },
         from.id,
       );
     }
   }
 
+  private normalizeMediaState(data: unknown): MediaState {
+    const value =
+      data && typeof data === "object" ? (data as Record<string, unknown>) : {};
+    return {
+      audioEnabled: !("audioEnabled" in value) || value.audioEnabled !== false,
+      videoEnabled: !("videoEnabled" in value) || value.videoEnabled !== false,
+    };
+  }
+
   private participantsExcept(excludedId: string): SignalParticipant[] {
     return [...this.sessions.values()]
       .filter((session) => session.id !== excludedId)
-      .map(({ id, userId, displayName }) => ({ id, userId, displayName }));
+      .map(({ id, userId, displayName, mediaState }) => ({
+        id,
+        userId,
+        displayName,
+        mediaState,
+      }));
   }
 
   private broadcast(message: unknown, excludedId?: string) {

@@ -36,7 +36,13 @@ label { display: grid; gap: 0.35rem; color: #b8c2d8; font-size: 0.92rem; }
 .video-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; margin-top: 1rem; }
 .video-card { overflow: hidden; border-radius: 1.1rem; background: #05070d; border: 1px solid rgba(255,255,255,0.1); position: relative; min-height: 210px; }
 .video-card video { width: 100%; height: 100%; min-height: 210px; object-fit: cover; display: block; background: #05070d; }
-.video-card .label { position: absolute; left: 0.75rem; bottom: 0.75rem; border-radius: 999px; padding: 0.35rem 0.65rem; background: rgba(0,0,0,0.62); color: white; font-size: 0.85rem; }
+.video-card .label { position: absolute; left: 0.75rem; bottom: 0.75rem; border-radius: 999px; padding: 0.35rem 0.65rem; background: rgba(0,0,0,0.62); color: white; font-size: 0.85rem; z-index: 2; }
+.video-card.camera-off video { opacity: 0.24; filter: grayscale(1); }
+.video-card .media-badges { position: absolute; right: 0.75rem; bottom: 0.75rem; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.35rem; max-width: calc(100% - 1.5rem); z-index: 2; }
+.video-card .media-badges:empty { display: none; }
+.video-card .media-badge { border-radius: 999px; padding: 0.35rem 0.55rem; background: rgba(229,72,77,0.9); color: white; font-size: 0.78rem; font-weight: 800; }
+.video-card .camera-off-message { position: absolute; inset: 0; display: none; place-items: center; background: rgba(5,7,13,0.58); color: #edf2ff; font-weight: 900; letter-spacing: 0.02em; pointer-events: none; z-index: 1; }
+.video-card.camera-off .camera-off-message { display: grid; }
 .pill { border: 1px solid rgba(255,255,255,0.12); border-radius: 999px; padding: 0.35rem 0.65rem; color: #b8c2d8; background: rgba(255,255,255,0.04); font-size: 0.85rem; }
 .recording-dot { width: 0.7rem; height: 0.7rem; border-radius: 999px; background: #8e9bb5; display: inline-block; }
 .recording-dot.live { background: #e5484d; box-shadow: 0 0 18px rgba(229,72,77,0.9); }
@@ -262,6 +268,8 @@ export function roomPage(roomId: string) {
     <div class="grid">
       <label>Webcam <select id="camera-select"></select></label>
       <label>Microphone <select id="microphone-select"></select></label>
+      <label class="checkbox"><input id="join-muted" type="checkbox" /> Join with microphone muted</label>
+      <label class="checkbox"><input id="join-camera-off" type="checkbox" /> Join with camera off</label>
       <label class="checkbox"><input id="auto-record" type="checkbox" checked /> Start local recording in the background when I join</label>
     </div>
     <div class="option-section">
@@ -272,7 +280,7 @@ export function roomPage(roomId: string) {
       <div class="option-title">Frame rate</div>
       <div id="frame-rate-options" class="radio-grid"></div>
     </div>
-    <button id="join-button">Join with camera and microphone</button>
+    <button id="join-button">Join call</button>
   </div>
 
   <div id="call-panel" class="hidden stack">
@@ -283,6 +291,8 @@ export function roomPage(roomId: string) {
           <span class="muted small">WebRTC media stays peer-to-peer. Signaling goes through a Cloudflare Durable Object.</span>
         </div>
         <div class="row">
+          <button id="toggle-microphone" class="secondary" type="button">Mute mic</button>
+          <button id="toggle-camera" class="secondary" type="button">Turn camera off</button>
           <button id="start-recording" class="secondary" type="button">Start recording</button>
           <button id="stop-recording" class="secondary" type="button" disabled>Stop recording</button>
           <button id="leave-button" class="danger" type="button">Leave</button>
@@ -294,6 +304,8 @@ export function roomPage(roomId: string) {
       <div class="video-card" id="local-card">
         <video id="local-video" autoplay playsinline muted></video>
         <span class="label">You</span>
+        <span class="media-badges"></span>
+        <span class="camera-off-message">Camera off</span>
       </div>
     </div>
   </div>
@@ -324,10 +336,13 @@ let webcamSupport = null;
 let hardwareDetectionInProgress = false;
 let hardwareDetectionRun = 0;
 let localStream = null;
+let localAudioEnabled = true;
+let localVideoEnabled = true;
 let ws = null;
 let participantId = null;
 const peers = new Map();
 const participants = new Map();
+const participantMediaStates = new Map();
 
 let mediaRecorder = null;
 let recordingStopPromise = null;
@@ -777,7 +792,7 @@ async function joinCall() {
   }
 
   $('join-button').disabled = true;
-  $('join-button').textContent = 'Requesting camera...';
+  $('join-button').textContent = 'Requesting media access...';
 
   const audioConstraints = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
   if (selectedAudioDeviceId) audioConstraints.deviceId = { exact: selectedAudioDeviceId };
@@ -800,7 +815,27 @@ async function joinCall() {
     webcamSupport = supportFromTrack(videoTrack);
     updateDeviceStatus();
   }
+  localAudioEnabled = !$('join-muted').checked;
+  localVideoEnabled = !$('join-camera-off').checked;
+  for (const track of localStream.getAudioTracks()) {
+    track.enabled = localAudioEnabled;
+    track.addEventListener('ended', () => {
+      updateLocalMediaControls();
+      updateLocalMediaIndicators();
+      sendLocalMediaState();
+    });
+  }
+  for (const track of localStream.getVideoTracks()) {
+    track.enabled = localVideoEnabled;
+    track.addEventListener('ended', () => {
+      updateLocalMediaControls();
+      updateLocalMediaIndicators();
+      sendLocalMediaState();
+    });
+  }
   $('local-video').srcObject = localStream;
+  updateLocalMediaControls();
+  updateLocalMediaIndicators();
 
   const joinData = await api('/api/rooms/' + window.ROOM_ID + '/join', {
     method: 'POST',
@@ -819,7 +854,10 @@ async function joinCall() {
 function connectSignaling() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   ws = new WebSocket(protocol + '//' + window.location.host + '/api/rooms/' + window.ROOM_ID + '/signaling?participantId=' + encodeURIComponent(participantId));
-  ws.addEventListener('open', () => setCallStatus('Connected to room signaling. Waiting for peers...'));
+  ws.addEventListener('open', () => {
+    setCallStatus('Connected to room signaling. Waiting for peers...');
+    sendLocalMediaState();
+  });
   ws.addEventListener('message', (event) => {
     try {
       const message = JSON.parse(event.data);
@@ -839,21 +877,28 @@ function sendSignal(message) {
 async function handleSignal(message) {
   if (message.type === 'welcome') {
     participantId = message.participantId;
-    for (const participant of message.participants || []) participants.set(participant.id, participant);
+    for (const participant of message.participants || []) {
+      participants.set(participant.id, participant);
+      if (participant.mediaState) participantMediaStates.set(participant.id, normalizeMediaState(participant.mediaState));
+    }
     setCallStatus('Joined. Peers in room: ' + (message.participants || []).length);
+    sendLocalMediaState();
     for (const participant of message.participants || []) await createOffer(participant.id);
     return;
   }
 
   if (message.type === 'participant-joined') {
     participants.set(message.participant.id, message.participant);
+    if (message.participant.mediaState) participantMediaStates.set(message.participant.id, normalizeMediaState(message.participant.mediaState));
     setCallStatus((message.participant.displayName || 'A participant') + ' joined.');
+    sendLocalMediaState();
     return;
   }
 
   if (message.type === 'participant-left') {
     closePeer(message.participantId);
     participants.delete(message.participantId);
+    participantMediaStates.delete(message.participantId);
     setCallStatus('A participant left.');
     return;
   }
@@ -877,6 +922,14 @@ async function handleSignal(message) {
   if (message.type === 'ice') {
     const pc = ensurePeer(message.from);
     if (message.data) await pc.addIceCandidate(new RTCIceCandidate(message.data));
+    return;
+  }
+
+  if (message.type === 'media-state') {
+    if (message.participantId) {
+      participantMediaStates.set(message.participantId, normalizeMediaState(message.data));
+      updateRemoteMediaState(message.participantId);
+    }
     return;
   }
 
@@ -916,12 +969,116 @@ function upsertRemoteVideo(id, stream) {
     card = document.createElement('div');
     card.className = 'video-card';
     card.id = 'remote-' + id;
-    card.innerHTML = '<video autoplay playsinline></video><span class="label"></span>';
+    card.innerHTML = '<video autoplay playsinline></video><span class="label"></span><span class="media-badges"></span><span class="camera-off-message">Camera off</span>';
     $('videos').appendChild(card);
   }
   const participant = participants.get(id) || { displayName: 'Guest' };
   card.querySelector('video').srcObject = stream;
-  card.querySelector('.label').textContent = participant.displayName || 'Guest';
+  updateMediaIndicators(card, participantMediaStates.get(id) || { audioEnabled: true, videoEnabled: true }, participant.displayName || 'Guest');
+}
+
+function normalizeMediaState(data) {
+  return {
+    audioEnabled: !data || data.audioEnabled !== false,
+    videoEnabled: !data || data.videoEnabled !== false,
+  };
+}
+
+function liveLocalTracks(kind) {
+  if (!localStream) return [];
+  const tracks = kind === 'audio' ? localStream.getAudioTracks() : localStream.getVideoTracks();
+  return tracks.filter((track) => track.readyState !== 'ended');
+}
+
+function localMediaState() {
+  return {
+    audioEnabled: liveLocalTracks('audio').some((track) => track.enabled),
+    videoEnabled: liveLocalTracks('video').some((track) => track.enabled),
+  };
+}
+
+function mediaBadge(text) {
+  const badge = document.createElement('span');
+  badge.className = 'media-badge';
+  badge.textContent = text;
+  return badge;
+}
+
+function updateMediaIndicators(card, mediaState, displayName) {
+  if (!card) return;
+  const state = normalizeMediaState(mediaState);
+  const label = card.querySelector('.label');
+  if (label) label.textContent = displayName;
+
+  let badges = card.querySelector('.media-badges');
+  if (!badges) {
+    badges = document.createElement('span');
+    badges.className = 'media-badges';
+    card.appendChild(badges);
+  }
+  badges.innerHTML = '';
+  if (!state.audioEnabled) badges.appendChild(mediaBadge('Mic muted'));
+  if (!state.videoEnabled) badges.appendChild(mediaBadge('Camera off'));
+
+  let cameraOffMessage = card.querySelector('.camera-off-message');
+  if (!cameraOffMessage) {
+    cameraOffMessage = document.createElement('span');
+    cameraOffMessage.className = 'camera-off-message';
+    card.appendChild(cameraOffMessage);
+  }
+  cameraOffMessage.textContent = 'Camera off';
+  card.classList.toggle('camera-off', !state.videoEnabled);
+}
+
+function updateLocalMediaControls() {
+  const hasAudio = liveLocalTracks('audio').length > 0;
+  const hasVideo = liveLocalTracks('video').length > 0;
+  const audioButton = $('toggle-microphone');
+  const videoButton = $('toggle-camera');
+
+  if (audioButton) {
+    audioButton.disabled = !hasAudio;
+    audioButton.textContent = hasAudio ? (localAudioEnabled ? 'Mute mic' : 'Unmute mic') : 'Mic unavailable';
+    audioButton.setAttribute('aria-pressed', String(hasAudio && !localAudioEnabled));
+  }
+
+  if (videoButton) {
+    videoButton.disabled = !hasVideo;
+    videoButton.textContent = hasVideo ? (localVideoEnabled ? 'Turn camera off' : 'Turn camera on') : 'Camera unavailable';
+    videoButton.setAttribute('aria-pressed', String(hasVideo && !localVideoEnabled));
+  }
+}
+
+function updateLocalMediaIndicators() {
+  updateMediaIndicators($('local-card'), localMediaState(), 'You');
+}
+
+function updateRemoteMediaState(id) {
+  const card = document.getElementById('remote-' + id);
+  if (!card) return;
+  const participant = participants.get(id) || { displayName: 'Guest' };
+  updateMediaIndicators(card, participantMediaStates.get(id) || { audioEnabled: true, videoEnabled: true }, participant.displayName || 'Guest');
+}
+
+function sendLocalMediaState() {
+  if (!participantId) return;
+  sendSignal({ type: 'media-state', data: localMediaState() });
+}
+
+function setLocalAudioEnabled(enabled) {
+  localAudioEnabled = Boolean(enabled);
+  for (const track of liveLocalTracks('audio')) track.enabled = localAudioEnabled;
+  updateLocalMediaControls();
+  updateLocalMediaIndicators();
+  sendLocalMediaState();
+}
+
+function setLocalVideoEnabled(enabled) {
+  localVideoEnabled = Boolean(enabled);
+  for (const track of liveLocalTracks('video')) track.enabled = localVideoEnabled;
+  updateLocalMediaControls();
+  updateLocalMediaIndicators();
+  sendLocalMediaState();
 }
 
 function closePeer(id) {
@@ -1085,7 +1242,9 @@ if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
     }).catch(showError);
   });
 }
-$('join-button').addEventListener('click', () => joinCall().catch((error) => { $('join-button').disabled = false; $('join-button').textContent = 'Join with camera and microphone'; updateJoinAvailability(); showError(error); }));
+$('join-button').addEventListener('click', () => joinCall().catch((error) => { $('join-button').disabled = false; $('join-button').textContent = 'Join call'; updateJoinAvailability(); showError(error); }));
+$('toggle-microphone').addEventListener('click', () => setLocalAudioEnabled(!localAudioEnabled));
+$('toggle-camera').addEventListener('click', () => setLocalVideoEnabled(!localVideoEnabled));
 $('start-recording').addEventListener('click', () => startRecording().catch(showError));
 $('stop-recording').addEventListener('click', () => stopRecording().catch(showError));
 $('leave-button').addEventListener('click', () => leaveCall().catch(showError));
