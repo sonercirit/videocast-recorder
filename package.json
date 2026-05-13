@@ -10,7 +10,6 @@
     "format": "prettier . --write --ignore-unknown",
     "format:check": "prettier . --check --ignore-unknown",
     "test:media": "bash scripts/create-test-virtual-cams.sh",
-    "test:cams": "bash scripts/create-test-virtual-cams.sh",
     "auth:schema:generate": "better-auth generate --config ./src/auth.config.ts --output ./src/db/auth-schema.gen.ts --yes",
     "db:generate": "npm run auth:schema:generate && drizzle-kit generate",
     "db:migrate:local": "wrangler d1 migrations apply videocast-recorder --local",

@@ -73,7 +73,6 @@ npm run deploy
 - `npm run format` - format files with Prettier
 - `npm run format:check` - check Prettier formatting
 - `npm run test:media -- <youtube-url>` - create four Linux virtual camera/microphone pairs from a YouTube video
-- `npm run test:cams -- <youtube-url>` - alias for `test:media`
 - `npm run auth:schema:generate` - regenerate the Better Auth Drizzle schema (`src/db/auth-schema.gen.ts`)
 - `npm run db:generate` - regenerate the auth schema, then generate Drizzle migrations from schema changes
 - `npm run db:migrate:local` - apply D1 migrations locally
