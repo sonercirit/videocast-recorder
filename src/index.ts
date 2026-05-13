@@ -482,13 +482,26 @@ app.get("/api/rooms/:roomId/recordings", async (c) => {
           eq(schema.recordings.userId, auth.user.id),
         );
 
-  const recordings = await c
+  const rows = await c
     .get("db")
-    .select()
+    .select({
+      recording: schema.recordings,
+      owner: {
+        id: schema.user.id,
+        name: schema.user.name,
+        email: schema.user.email,
+      },
+    })
     .from(schema.recordings)
+    .leftJoin(schema.user, eq(schema.recordings.userId, schema.user.id))
     .where(where)
     .orderBy(desc(schema.recordings.createdAt))
     .limit(100);
+
+  const recordings = rows.map(({ recording, owner }) => ({
+    ...recording,
+    owner,
+  }));
 
   return c.json({ recordings });
 });

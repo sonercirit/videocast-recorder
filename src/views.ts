@@ -1364,6 +1364,16 @@ async function finalizeRecording() {
   await loadRecordings();
 }
 
+function recordingOwnerLabel(recording) {
+  const owner = recording.owner || {};
+  const name = owner.name || '';
+  const email = owner.email || '';
+  let label = name && email && name !== email ? name + ' · ' + email : (name || email);
+  if (!label && recording.userId) label = 'User ' + String(recording.userId).slice(0, 8);
+  if (!label) label = 'Unknown user';
+  return owner.id && me && owner.id === me.id ? label + ' (you)' : label;
+}
+
 async function loadRecordings() {
   const container = $('recordings');
   if (!container) return;
@@ -1377,7 +1387,7 @@ async function loadRecordings() {
     const item = document.createElement('div');
     item.className = 'recording-item';
     const duration = recording.durationMs ? Math.round(recording.durationMs / 1000) + 's' : 'in progress';
-    item.innerHTML = '<div class="row spread"><strong></strong><div class="row"><a class="pill download-link hidden">Download</a><span class="pill status-pill"></span></div></div><div class="muted small"></div>';
+    item.innerHTML = '<div class="row spread"><div><strong></strong><div class="muted small recording-owner"></div></div><div class="row"><a class="pill download-link hidden">Download</a><span class="pill status-pill"></span></div></div><div class="muted small recording-meta"></div>';
     const quality = qualityPresets[recording.quality];
     const frameRate = recording.frameRate || 30;
     const sessionId = recording.recordingSessionId || recording.id;
@@ -1386,8 +1396,9 @@ async function loadRecordings() {
     const offsetMs = Number.isFinite(syncStartedMs) && Number.isFinite(localStartedMs) ? localStartedMs - syncStartedMs : null;
     const offsetText = Number.isFinite(offsetMs) ? ' · offset ' + (offsetMs / 1000).toFixed(1) + 's' : '';
     item.querySelector('strong').textContent = (quality ? quality.label : recording.quality) + ' · ' + frameRate + ' FPS synced track';
+    item.querySelector('.recording-owner').textContent = 'Owner: ' + recordingOwnerLabel(recording);
     item.querySelector('.status-pill').textContent = recording.status;
-    item.querySelector('.muted').textContent = recording.chunkCount + ' chunks · ' + duration + ' · ' + recording.mimeType + ' · session ' + sessionId.slice(0, 12) + offsetText;
+    item.querySelector('.recording-meta').textContent = recording.chunkCount + ' chunks · ' + duration + ' · ' + recording.mimeType + ' · session ' + sessionId.slice(0, 12) + offsetText;
     const downloadLink = item.querySelector('.download-link');
     if (recording.status === 'completed' && recording.chunkCount > 0) {
       downloadLink.href = '/api/recordings/' + encodeURIComponent(recording.id) + '/download';
