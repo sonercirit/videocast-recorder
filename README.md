@@ -72,11 +72,28 @@ npm run deploy
 - `npm run typecheck` - TypeScript check
 - `npm run format` - format files with Prettier
 - `npm run format:check` - check Prettier formatting
+- `npm run test:cams -- <youtube-url>` - create four Linux v4l2loopback test cameras from a YouTube video
 - `npm run auth:schema:generate` - regenerate the Better Auth Drizzle schema (`src/db/auth-schema.gen.ts`)
 - `npm run db:generate` - regenerate the auth schema, then generate Drizzle migrations from schema changes
 - `npm run db:migrate:local` - apply D1 migrations locally
 - `npm run db:migrate:remote` - apply D1 migrations remotely
 - `npm run deploy` - deploy Worker
+
+## Virtual camera test setup
+
+On Linux, install the required tools:
+
+```bash
+sudo apt install ffmpeg yt-dlp v4l2loopback-dkms v4l2loopback-utils
+```
+
+Start four looped virtual cameras from a YouTube URL:
+
+```bash
+npm run test:cams -- "https://www.youtube.com/watch?v=..."
+```
+
+The script creates `/dev/video42` through `/dev/video45` by default. It samples 5 seconds, skips 5 seconds, and repeats that four times. The cameras then loop a 20-second schedule where cam 1 plays during seconds 0-5, cam 2 during 5-10, cam 3 during 10-15, and cam 4 during 15-20; inactive cameras output black frames.
 
 ## Notes
 
