@@ -60,6 +60,9 @@ label { display: grid; gap: 0.35rem; color: #b8c2d8; font-size: 0.92rem; }
 .option-warning { color: #ffb0b3; font-size: 0.82rem; }
 .device-status { color: #b8c2d8; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.09); padding: 0.75rem; border-radius: 0.8rem; }
 .device-status.warning { color: #ffd2a8; background: rgba(255,176,0,0.10); border-color: rgba(255,176,0,0.28); }
+.join-devices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; align-items: start; }
+.join-device-column { display: grid; gap: 0.75rem; align-content: start; }
+@media (max-width: 720px) { .join-devices { grid-template-columns: 1fr; } }
 .recording-list { display: grid; gap: 0.75rem; }
 .recording-item { border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.03); border-radius: 0.9rem; padding: 0.85rem; }
 .small { font-size: 0.88rem; }
@@ -265,11 +268,15 @@ export function roomPage(roomId: string) {
     <h2>Join videocast</h2>
     <p class="muted">Pick your webcam, microphone, local recording resolution, and frame rate. The host starts and stops one synced recording session for everyone.</p>
     <div id="device-status" class="device-status">Detecting webcam quality and available devices...</div>
-    <div class="grid">
-      <label>Webcam <select id="camera-select"></select></label>
-      <label>Microphone <select id="microphone-select"></select></label>
-      <label class="checkbox"><input id="join-muted" type="checkbox" /> Join with microphone muted</label>
-      <label class="checkbox"><input id="join-camera-off" type="checkbox" /> Join with camera off</label>
+    <div class="join-devices">
+      <div class="join-device-column">
+        <label>Webcam <select id="camera-select"></select></label>
+        <label class="checkbox"><input id="join-camera-off" type="checkbox" /> Join with camera off</label>
+      </div>
+      <div class="join-device-column">
+        <label>Microphone <select id="microphone-select"></select></label>
+        <label class="checkbox"><input id="join-muted" type="checkbox" /> Join with microphone muted</label>
+      </div>
     </div>
     <div class="option-section">
       <div class="option-title">Resolution</div>
