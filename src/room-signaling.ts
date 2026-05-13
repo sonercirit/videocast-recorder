@@ -7,11 +7,25 @@ type SignalParticipant = {
   id: string;
   userId: string;
   displayName: string;
+  isHost: boolean;
   mediaState: MediaState;
 };
 
 type SignalSession = SignalParticipant & {
   socket: WebSocket;
+};
+
+type RoomRecordingState = {
+  active: boolean;
+  sessionId: string;
+  startedAt: number;
+  startedBy: string;
+};
+
+type RoomRecordingStopState = RoomRecordingState & {
+  active: false;
+  stoppedAt: number;
+  stoppedBy: string;
 };
 
 type ClientSignal = {
@@ -22,6 +36,8 @@ type ClientSignal = {
 
 export class RoomSignaling {
   private sessions = new Map<string, SignalSession>();
+  private recordingState: RoomRecordingState | null = null;
+  private initialized = false;
 
   constructor(
     private readonly state: DurableObjectState,
@@ -32,6 +48,8 @@ export class RoomSignaling {
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("Expected WebSocket upgrade", { status: 426 });
     }
+
+    await this.ensureInitialized();
 
     const pair = new WebSocketPair();
     const client = pair[0];
@@ -44,6 +62,7 @@ export class RoomSignaling {
         crypto.randomUUID(),
       userId: request.headers.get("x-user-id") ?? "unknown",
       displayName: request.headers.get("x-user-name") ?? "Guest",
+      isHost: request.headers.get("x-is-host") === "true",
       mediaState: { audioEnabled: true, videoEnabled: true },
     };
 
@@ -54,6 +73,8 @@ export class RoomSignaling {
       type: "welcome",
       participantId: participant.id,
       participants: this.participantsExcept(participant.id),
+      recordingState: this.recordingState,
+      serverTime: Date.now(),
     });
 
     this.broadcast(
@@ -76,7 +97,12 @@ export class RoomSignaling {
     server.addEventListener("message", (event) => {
       try {
         const message = JSON.parse(String(event.data)) as ClientSignal;
-        this.handleClientMessage(participant, message);
+        this.handleClientMessage(participant, message).catch(() => {
+          this.send(server, {
+            type: "error",
+            message: "Could not process signaling message",
+          });
+        });
       } catch {
         this.send(server, {
           type: "error",
@@ -91,7 +117,10 @@ export class RoomSignaling {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  private handleClientMessage(from: SignalParticipant, message: ClientSignal) {
+  private async handleClientMessage(
+    from: SignalParticipant,
+    message: ClientSignal,
+  ) {
     if (["offer", "answer", "ice"].includes(message.type)) {
       if (!message.to) return;
       const target = this.sessions.get(message.to);
@@ -118,7 +147,81 @@ export class RoomSignaling {
         },
         from.id,
       );
+      return;
     }
+
+    if (message.type === "recording-start-request") {
+      await this.handleRecordingStartRequest(from);
+      return;
+    }
+
+    if (message.type === "recording-stop-request") {
+      await this.handleRecordingStopRequest(from);
+    }
+  }
+
+  private async handleRecordingStartRequest(from: SignalParticipant) {
+    if (!from.isHost) {
+      this.sendError(from.id, "Only the host can start recording");
+      return;
+    }
+
+    if (this.recordingState?.active) {
+      this.sendToParticipant(from.id, {
+        type: "recording-start",
+        recording: this.recordingState,
+        serverTime: Date.now(),
+      });
+      return;
+    }
+
+    const recordingState: RoomRecordingState = {
+      active: true,
+      sessionId: `rs_${crypto.randomUUID().replaceAll("-", "")}`,
+      // Give every browser a short countdown so local MediaRecorders start in sync.
+      startedAt: Date.now() + 3000,
+      startedBy: from.id,
+    };
+
+    this.recordingState = recordingState;
+    await this.state.storage.put("recordingState", recordingState);
+    this.broadcast({
+      type: "recording-start",
+      recording: recordingState,
+      serverTime: Date.now(),
+    });
+  }
+
+  private async handleRecordingStopRequest(from: SignalParticipant) {
+    if (!from.isHost) {
+      this.sendError(from.id, "Only the host can stop recording");
+      return;
+    }
+
+    if (!this.recordingState?.active) {
+      this.sendToParticipant(from.id, {
+        type: "recording-stop",
+        recording: null,
+        serverTime: Date.now(),
+      });
+      return;
+    }
+
+    const stopState: RoomRecordingStopState = {
+      ...this.recordingState,
+      active: false,
+      // Delay stop very slightly so all clients receive the command first.
+      stoppedAt: Date.now() + 1500,
+      stoppedBy: from.id,
+    };
+
+    this.recordingState = null;
+    await this.state.storage.delete("recordingState");
+    this.broadcast({
+      type: "recording-stop",
+      recording: stopState,
+      serverTime: Date.now(),
+    });
   }
 
   private normalizeMediaState(data: unknown): MediaState {
@@ -133,10 +236,11 @@ export class RoomSignaling {
   private participantsExcept(excludedId: string): SignalParticipant[] {
     return [...this.sessions.values()]
       .filter((session) => session.id !== excludedId)
-      .map(({ id, userId, displayName, mediaState }) => ({
+      .map(({ id, userId, displayName, isHost, mediaState }) => ({
         id,
         userId,
         displayName,
+        isHost,
         mediaState,
       }));
   }
@@ -146,6 +250,23 @@ export class RoomSignaling {
       if (id === excludedId) continue;
       this.send(session.socket, message);
     }
+  }
+
+  private sendToParticipant(participantId: string, message: unknown) {
+    const session = this.sessions.get(participantId);
+    if (session) this.send(session.socket, message);
+  }
+
+  private sendError(participantId: string, message: string) {
+    this.sendToParticipant(participantId, { type: "error", message });
+  }
+
+  private async ensureInitialized() {
+    if (this.initialized) return;
+    this.recordingState =
+      (await this.state.storage.get<RoomRecordingState>("recordingState")) ??
+      null;
+    this.initialized = true;
   }
 
   private send(socket: WebSocket, message: unknown) {

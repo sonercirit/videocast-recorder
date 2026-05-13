@@ -93,11 +93,14 @@ const startRecordingSchema = z.object({
   quality: qualitySchema,
   frameRate: frameRateSchema.default(30),
   mimeType: z.string().trim().min(1).max(120),
+  recordingSessionId: z.string().trim().min(1).max(120).optional(),
+  syncStartedAt: z.number().int().positive().optional(),
 });
 
 const completeRecordingSchema = z.object({
   chunkCount: z.number().int().nonnegative(),
   durationMs: z.number().int().nonnegative(),
+  syncStoppedAt: z.number().int().positive().optional(),
 });
 
 app.use("*", async (c, next) => {
@@ -231,6 +234,12 @@ app.get("/api/rooms/:roomId/signaling", async (c) => {
   const participantId = c.req.query("participantId");
   if (!participantId) return c.json({ error: "Missing participantId" }, 400);
 
+  const room = await getRoom(c.get("db"), roomId);
+  if (!room) return c.json({ error: "Room not found" }, 404);
+  if (!room.isOpen && room.ownerUserId !== auth.user.id) {
+    return c.json({ error: "Room is closed" }, 403);
+  }
+
   const [participant] = await c
     .get("db")
     .select()
@@ -252,6 +261,7 @@ app.get("/api/rooms/:roomId/signaling", async (c) => {
   upstream.headers.set("x-user-id", auth.user.id);
   upstream.headers.set("x-user-name", participant.displayName);
   upstream.headers.set("x-participant-id", participant.id);
+  upstream.headers.set("x-is-host", String(room.ownerUserId === auth.user.id));
 
   return stub.fetch(upstream);
 });
@@ -270,6 +280,10 @@ app.post("/api/rooms/:roomId/recordings/start", async (c) => {
 
   const now = new Date();
   const recordingId = newId("rec");
+  const recordingSessionId = input.data.recordingSessionId ?? recordingId;
+  const syncStartedAt = input.data.syncStartedAt
+    ? new Date(input.data.syncStartedAt)
+    : now;
   const recording = {
     id: recordingId,
     roomId,
@@ -277,6 +291,9 @@ app.post("/api/rooms/:roomId/recordings/start", async (c) => {
     quality: input.data.quality,
     frameRate: input.data.frameRate,
     mimeType: input.data.mimeType,
+    recordingSessionId,
+    syncStartedAt,
+    syncStoppedAt: null,
     status: "recording" as const,
     r2Prefix: `rooms/${roomId}/recordings/${recordingId}`,
     chunkCount: 0,
@@ -329,6 +346,7 @@ app.put(
       customMetadata: {
         roomId: recording.roomId,
         recordingId: recording.id,
+        recordingSessionId: recording.recordingSessionId ?? recording.id,
         userId: auth.user.id,
         chunkIndex: String(chunkIndex),
         quality: recording.quality,
@@ -394,6 +412,10 @@ app.post("/api/rooms/:roomId/recordings/:recordingId/complete", async (c) => {
     .orderBy(asc(schema.recordingChunks.chunkIndex));
 
   const now = new Date();
+  const syncStoppedAt = input.data.syncStoppedAt
+    ? new Date(input.data.syncStoppedAt)
+    : now;
+  const syncStartedAt = recording.syncStartedAt ?? recording.startedAt;
   const chunkCount = chunks.length || input.data.chunkCount;
   await c.env.RECORDINGS.put(
     `${recording.r2Prefix}/manifest.json`,
@@ -402,10 +424,15 @@ app.post("/api/rooms/:roomId/recordings/:recordingId/complete", async (c) => {
         recordingId: recording.id,
         roomId: recording.roomId,
         userId: recording.userId,
+        recordingSessionId: recording.recordingSessionId ?? recording.id,
         quality: recording.quality,
         frameRate: recording.frameRate,
         mimeType: recording.mimeType,
         durationMs: input.data.durationMs,
+        localStartedAt: recording.startedAt.toISOString(),
+        syncStartedAt: syncStartedAt.toISOString(),
+        syncStoppedAt: syncStoppedAt.toISOString(),
+        syncOffsetMs: recording.startedAt.getTime() - syncStartedAt.getTime(),
         chunkCount,
         chunks: chunks.map((chunk) => ({
           index: chunk.chunkIndex,
@@ -427,6 +454,7 @@ app.post("/api/rooms/:roomId/recordings/:recordingId/complete", async (c) => {
       status: "completed",
       chunkCount,
       durationMs: input.data.durationMs,
+      syncStoppedAt,
       completedAt: now,
       updatedAt: now,
     })
@@ -499,6 +527,13 @@ app.get("/api/recordings/:recordingId/download", async (c) => {
   );
   headers.set("cache-control", "private, max-age=60");
   headers.set("x-recording-id", recording.id);
+  headers.set(
+    "x-recording-session-id",
+    recording.recordingSessionId ?? recording.id,
+  );
+  if (recording.syncStartedAt) {
+    headers.set("x-sync-started-at", recording.syncStartedAt.toISOString());
+  }
   headers.set("x-recording-chunks", String(chunks.length));
 
   if (chunks.every((chunk) => chunk.byteLength > 0)) {

@@ -90,7 +90,7 @@ export function homePage() {
 <section class="hero">
   <span class="pill">Cloudflare Workers · D1 · R2 · Durable Objects</span>
   <h1>Record-ready videocast rooms.</h1>
-  <p>Create a room, invite guests, talk over peer-to-peer WebRTC, and upload each participant's local recording chunks to Cloudflare R2 in the background.</p>
+  <p>Create a room, invite guests, talk over peer-to-peer WebRTC, and let the host start one synced local recording session for every participant.</p>
 </section>
 
 <section id="auth-view" class="grid hidden">
@@ -263,14 +263,13 @@ export function roomPage(roomId: string) {
 
   <div id="join-panel" class="card stack">
     <h2>Join videocast</h2>
-    <p class="muted">Pick your webcam, microphone, recording resolution, and frame rate. Higher settings create larger R2 uploads.</p>
+    <p class="muted">Pick your webcam, microphone, local recording resolution, and frame rate. The host starts and stops one synced recording session for everyone.</p>
     <div id="device-status" class="device-status">Detecting webcam quality and available devices...</div>
     <div class="grid">
       <label>Webcam <select id="camera-select"></select></label>
       <label>Microphone <select id="microphone-select"></select></label>
       <label class="checkbox"><input id="join-muted" type="checkbox" /> Join with microphone muted</label>
       <label class="checkbox"><input id="join-camera-off" type="checkbox" /> Join with camera off</label>
-      <label class="checkbox"><input id="auto-record" type="checkbox" checked /> Start local recording in the background when I join</label>
     </div>
     <div class="option-section">
       <div class="option-title">Resolution</div>
@@ -293,11 +292,12 @@ export function roomPage(roomId: string) {
         <div class="row">
           <button id="toggle-microphone" class="secondary" type="button">Mute mic</button>
           <button id="toggle-camera" class="secondary" type="button">Turn camera off</button>
-          <button id="start-recording" class="secondary" type="button">Start recording</button>
-          <button id="stop-recording" class="secondary" type="button" disabled>Stop recording</button>
+          <button id="start-recording" class="secondary" type="button">Start recording for everyone</button>
+          <button id="stop-recording" class="secondary" type="button" disabled>Stop recording for everyone</button>
           <button id="leave-button" class="danger" type="button">Leave</button>
         </div>
       </div>
+      <p id="recording-role-note" class="muted small">Only the host can start or stop; every participant records locally in sync.</p>
     </div>
 
     <div id="videos" class="video-grid">
@@ -322,6 +322,7 @@ const $ = (id) => document.getElementById(id);
 
 let me = null;
 let room = null;
+let isHost = false;
 let qualityPresets = {};
 let frameRatePresets = [];
 let selectedQuality = 'medium';
@@ -339,6 +340,7 @@ let localStream = null;
 let localAudioEnabled = true;
 let localVideoEnabled = true;
 let ws = null;
+let serverClockOffsetMs = 0;
 let participantId = null;
 const peers = new Map();
 const participants = new Map();
@@ -347,8 +349,15 @@ const participantMediaStates = new Map();
 let mediaRecorder = null;
 let recordingStopPromise = null;
 let currentRecordingId = null;
+let currentRecordingSessionId = null;
+let currentSyncStartedAt = null;
+let currentSyncStoppedAt = null;
 let currentMimeType = 'video/webm';
 let recordingStartedAt = 0;
+let recordingLive = false;
+let recordingControlPending = false;
+let pendingRecordingStartTimer = null;
+let pendingRecordingStopTimer = null;
 let uploadedChunkCount = 0;
 let uploadChain = Promise.resolve();
 
@@ -383,11 +392,45 @@ function setCallStatus(message) {
   $('call-status').textContent = message;
 }
 
-function setRecordingState(message, live) {
+function signalingReady() {
+  return ws && ws.readyState === WebSocket.OPEN;
+}
+
+function updateServerClock(serverTime) {
+  const value = Number(serverTime);
+  if (Number.isFinite(value)) serverClockOffsetMs = value - Date.now();
+}
+
+function syncedNow() {
+  return Date.now() + serverClockOffsetMs;
+}
+
+function updateRecordingRoleNote() {
+  const note = $('recording-role-note');
+  if (!note) return;
+  note.textContent = isHost
+    ? 'You are the host. Starting or stopping recording controls every participant at the same synced time.'
+    : 'Only the host can start or stop recording. Your browser records locally when the host starts the synced session.';
+}
+
+function updateRecordingControls() {
+  const startButton = $('start-recording');
+  const stopButton = $('stop-recording');
+  if (!startButton || !stopButton) return;
+  startButton.textContent = isHost ? 'Start recording for everyone' : 'Host controls recording';
+  stopButton.textContent = 'Stop recording for everyone';
+  stopButton.classList.toggle('hidden', !isHost);
+  startButton.disabled = !isHost || recordingLive || recordingControlPending || !localStream || !signalingReady();
+  stopButton.disabled = !isHost || (!recordingLive && !recordingControlPending) || !localStream || !signalingReady();
+  updateRecordingRoleNote();
+}
+
+function setRecordingState(message, live, pending) {
+  recordingLive = Boolean(live);
+  recordingControlPending = Boolean(pending);
   $('recording-state').textContent = message;
-  $('recording-dot').classList.toggle('live', Boolean(live));
-  $('start-recording').disabled = Boolean(live) || !localStream;
-  $('stop-recording').disabled = !live;
+  $('recording-dot').classList.toggle('live', recordingLive || recordingControlPending);
+  updateRecordingControls();
 }
 
 async function init() {
@@ -400,6 +443,8 @@ async function init() {
 
     const roomData = await api('/api/rooms/' + window.ROOM_ID);
     room = roomData.room;
+    isHost = room.ownerUserId === me.id;
+    updateRecordingControls();
     $('room-name').textContent = room.name;
     $('room-meta').textContent = 'Room link: ' + window.location.href;
 
@@ -845,10 +890,8 @@ async function joinCall() {
 
   $('join-panel').classList.add('hidden');
   $('call-panel').classList.remove('hidden');
-  setRecordingState('Not recording', false);
+  setRecordingState('Not recording', false, false);
   connectSignaling();
-
-  if ($('auto-record').checked) await startRecording();
 }
 
 function connectSignaling() {
@@ -856,6 +899,7 @@ function connectSignaling() {
   ws = new WebSocket(protocol + '//' + window.location.host + '/api/rooms/' + window.ROOM_ID + '/signaling?participantId=' + encodeURIComponent(participantId));
   ws.addEventListener('open', () => {
     setCallStatus('Connected to room signaling. Waiting for peers...');
+    updateRecordingControls();
     sendLocalMediaState();
   });
   ws.addEventListener('message', (event) => {
@@ -866,7 +910,10 @@ function connectSignaling() {
       showError(error);
     }
   });
-  ws.addEventListener('close', () => setCallStatus('Disconnected from room signaling.'));
+  ws.addEventListener('close', () => {
+    setCallStatus('Disconnected from room signaling.');
+    updateRecordingControls();
+  });
   ws.addEventListener('error', () => showError(new Error('Signaling connection failed')));
 }
 
@@ -875,6 +922,8 @@ function sendSignal(message) {
 }
 
 async function handleSignal(message) {
+  if (message.serverTime) updateServerClock(message.serverTime);
+
   if (message.type === 'welcome') {
     participantId = message.participantId;
     for (const participant of message.participants || []) {
@@ -883,6 +932,9 @@ async function handleSignal(message) {
     }
     setCallStatus('Joined. Peers in room: ' + (message.participants || []).length);
     sendLocalMediaState();
+    if (message.recordingState && message.recordingState.active) {
+      scheduleRoomRecordingStart(message.recordingState);
+    }
     for (const participant of message.participants || []) await createOffer(participant.id);
     return;
   }
@@ -933,7 +985,20 @@ async function handleSignal(message) {
     return;
   }
 
-  if (message.type === 'error') showError(new Error(message.message || 'Signaling error'));
+  if (message.type === 'recording-start') {
+    scheduleRoomRecordingStart(message.recording);
+    return;
+  }
+
+  if (message.type === 'recording-stop') {
+    scheduleRoomRecordingStop(message.recording);
+    return;
+  }
+
+  if (message.type === 'error') {
+    setRecordingState(recordingLive ? 'Recording in sync' : 'Not recording', recordingLive, false);
+    showError(new Error(message.message || 'Signaling error'));
+  }
 }
 
 function ensurePeer(id) {
@@ -1089,6 +1154,96 @@ function closePeer(id) {
   if (card) card.remove();
 }
 
+function clearPendingRecordingTimers() {
+  if (pendingRecordingStartTimer) {
+    clearTimeout(pendingRecordingStartTimer);
+    pendingRecordingStartTimer = null;
+  }
+  if (pendingRecordingStopTimer) {
+    clearTimeout(pendingRecordingStopTimer);
+    pendingRecordingStopTimer = null;
+  }
+}
+
+function requestRoomRecordingStart() {
+  clearError();
+  if (!isHost) throw new Error('Only the host can start recording');
+  if (!localStream) throw new Error('Join the call before recording');
+  if (!signalingReady()) throw new Error('Room signaling is not connected yet');
+  sendSignal({ type: 'recording-start-request' });
+  setRecordingState('Starting recording for everyone...', false, true);
+}
+
+function requestRoomRecordingStop() {
+  clearError();
+  if (!isHost) throw new Error('Only the host can stop recording');
+  if (!signalingReady()) throw new Error('Room signaling is not connected yet');
+  sendSignal({ type: 'recording-stop-request' });
+  setRecordingState(recordingLive ? 'Stopping recording for everyone...' : 'Canceling synced start...', recordingLive, true);
+}
+
+function scheduleRoomRecordingStart(recording) {
+  if (!recording || !recording.sessionId) return;
+  if (!localStream) return;
+  const recordingSessionId = String(recording.sessionId);
+  const syncStartedAt = Number(recording.startedAt) || syncedNow();
+  currentRecordingSessionId = recordingSessionId;
+  currentSyncStartedAt = syncStartedAt;
+  currentSyncStoppedAt = null;
+  if (pendingRecordingStartTimer) clearTimeout(pendingRecordingStartTimer);
+  if (pendingRecordingStopTimer) {
+    clearTimeout(pendingRecordingStopTimer);
+    pendingRecordingStopTimer = null;
+  }
+
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    setRecordingState('Recording in sync', true, false);
+    return;
+  }
+
+  const delay = Math.max(0, syncStartedAt - syncedNow());
+  setRecordingState(delay > 0 ? 'Recording starts in ' + Math.ceil(delay / 1000) + 's' : 'Starting synced recording', false, true);
+  pendingRecordingStartTimer = window.setTimeout(() => {
+    pendingRecordingStartTimer = null;
+    startRecording({ recordingSessionId, syncStartedAt }).catch((error) => {
+      setRecordingState('Not recording', false, false);
+      showError(error);
+    });
+  }, delay);
+}
+
+function scheduleRoomRecordingStop(recording) {
+  const recordingSessionId = recording && recording.sessionId ? String(recording.sessionId) : currentRecordingSessionId;
+  const syncStoppedAt = recording && Number(recording.stoppedAt) ? Number(recording.stoppedAt) : syncedNow();
+
+  if (pendingRecordingStartTimer && (!recordingSessionId || recordingSessionId === currentRecordingSessionId)) {
+    clearTimeout(pendingRecordingStartTimer);
+    pendingRecordingStartTimer = null;
+    currentRecordingSessionId = null;
+    currentSyncStartedAt = null;
+    currentSyncStoppedAt = null;
+    setRecordingState('Not recording', false, false);
+    return;
+  }
+
+  currentSyncStoppedAt = syncStoppedAt;
+  if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+    setRecordingState('Not recording', false, false);
+    return;
+  }
+
+  if (pendingRecordingStopTimer) clearTimeout(pendingRecordingStopTimer);
+  const delay = Math.max(0, syncStoppedAt - syncedNow());
+  setRecordingState(delay > 0 ? 'Recording stops in ' + Math.ceil(delay / 1000) + 's' : 'Stopping synced recording', true, true);
+  pendingRecordingStopTimer = window.setTimeout(() => {
+    pendingRecordingStopTimer = null;
+    stopRecording({ syncStoppedAt }).catch((error) => {
+      setRecordingState('Recording save failed', false, false);
+      showError(error);
+    });
+  }, delay);
+}
+
 function supportedMimeType() {
   const candidates = [
     'video/webm;codecs=vp9,opus',
@@ -1103,30 +1258,35 @@ function videoBitsPerSecondFor(preset, frameRate) {
   return Math.round(preset.videoBitsPerSecond * (frameRate / 30));
 }
 
-async function startRecording() {
+async function startRecording(options = {}) {
   if (!localStream) throw new Error('Join the call before recording');
   if (mediaRecorder && mediaRecorder.state !== 'inactive') return;
 
+  const recordingSessionId = options.recordingSessionId || currentRecordingSessionId || ('local_' + Date.now());
+  const syncStartedAt = Number(options.syncStartedAt || currentSyncStartedAt || syncedNow());
   const mimeType = supportedMimeType() || 'video/webm';
   const startData = await api('/api/rooms/' + window.ROOM_ID + '/recordings/start', {
     method: 'POST',
-    body: { quality: selectedQuality, frameRate: selectedFrameRate, mimeType },
+    body: { quality: selectedQuality, frameRate: selectedFrameRate, mimeType, recordingSessionId, syncStartedAt },
   });
 
   currentRecordingId = startData.recording.id;
+  currentRecordingSessionId = startData.recording.recordingSessionId || recordingSessionId;
+  currentSyncStartedAt = syncStartedAt;
+  currentSyncStoppedAt = null;
   currentMimeType = startData.recording.mimeType;
   uploadedChunkCount = 0;
   uploadChain = Promise.resolve();
   recordingStartedAt = Date.now();
 
   const preset = qualityPresets[selectedQuality];
-  const options = {
+  const recorderOptions = {
     videoBitsPerSecond: videoBitsPerSecondFor(preset, selectedFrameRate),
     audioBitsPerSecond: preset.audioBitsPerSecond,
   };
-  if (mimeType) options.mimeType = mimeType;
+  if (mimeType) recorderOptions.mimeType = mimeType;
 
-  mediaRecorder = new MediaRecorder(localStream, options);
+  mediaRecorder = new MediaRecorder(localStream, recorderOptions);
   mediaRecorder.addEventListener('dataavailable', (event) => {
     if (!event.data || event.data.size === 0 || !currentRecordingId) return;
     const chunkIndex = uploadedChunkCount++;
@@ -1138,7 +1298,7 @@ async function startRecording() {
     mediaRecorder.addEventListener('stop', () => finalizeRecording().then(resolve, reject), { once: true });
   });
   mediaRecorder.start(5000);
-  setRecordingState('Recording locally', true);
+  setRecordingState('Recording in sync', true, false);
 }
 
 async function uploadChunk(recordingId, chunkIndex, blob) {
@@ -1158,7 +1318,12 @@ async function uploadChunk(recordingId, chunkIndex, blob) {
   }
 }
 
-async function stopRecording() {
+async function stopRecording(options = {}) {
+  if (options.syncStoppedAt) currentSyncStoppedAt = Number(options.syncStoppedAt);
+  if (pendingRecordingStartTimer) {
+    clearTimeout(pendingRecordingStartTimer);
+    pendingRecordingStartTimer = null;
+  }
   const stopped = recordingStopPromise;
   if (mediaRecorder && mediaRecorder.state === 'recording') {
     mediaRecorder.requestData();
@@ -1170,19 +1335,25 @@ async function stopRecording() {
 async function finalizeRecording() {
   const recordingId = currentRecordingId;
   if (!recordingId) return;
-  setRecordingState('Finishing upload', false);
+  const syncStoppedAt = currentSyncStoppedAt || syncedNow();
+  setRecordingState('Finishing upload', false, true);
   await uploadChain;
   await api('/api/rooms/' + window.ROOM_ID + '/recordings/' + recordingId + '/complete', {
     method: 'POST',
     body: {
       chunkCount: uploadedChunkCount,
       durationMs: Date.now() - recordingStartedAt,
+      syncStoppedAt,
     },
   });
   currentRecordingId = null;
+  currentRecordingSessionId = null;
+  currentSyncStartedAt = null;
+  currentSyncStoppedAt = null;
   mediaRecorder = null;
   recordingStopPromise = null;
-  setRecordingState('Recording saved', false);
+  clearPendingRecordingTimers();
+  setRecordingState('Recording saved', false, false);
   await loadRecordings();
 }
 
@@ -1202,9 +1373,14 @@ async function loadRecordings() {
     item.innerHTML = '<div class="row spread"><strong></strong><div class="row"><a class="pill download-link hidden">Download</a><span class="pill status-pill"></span></div></div><div class="muted small"></div>';
     const quality = qualityPresets[recording.quality];
     const frameRate = recording.frameRate || 30;
-    item.querySelector('strong').textContent = (quality ? quality.label : recording.quality) + ' · ' + frameRate + ' FPS local recording';
+    const sessionId = recording.recordingSessionId || recording.id;
+    const syncStartedMs = recording.syncStartedAt ? new Date(recording.syncStartedAt).getTime() : null;
+    const localStartedMs = recording.startedAt ? new Date(recording.startedAt).getTime() : null;
+    const offsetMs = Number.isFinite(syncStartedMs) && Number.isFinite(localStartedMs) ? localStartedMs - syncStartedMs : null;
+    const offsetText = Number.isFinite(offsetMs) ? ' · offset ' + (offsetMs / 1000).toFixed(1) + 's' : '';
+    item.querySelector('strong').textContent = (quality ? quality.label : recording.quality) + ' · ' + frameRate + ' FPS synced track';
     item.querySelector('.status-pill').textContent = recording.status;
-    item.querySelector('.muted').textContent = recording.chunkCount + ' chunks · ' + duration + ' · ' + recording.mimeType;
+    item.querySelector('.muted').textContent = recording.chunkCount + ' chunks · ' + duration + ' · ' + recording.mimeType + ' · session ' + sessionId.slice(0, 12) + offsetText;
     const downloadLink = item.querySelector('.download-link');
     if (recording.status === 'completed' && recording.chunkCount > 0) {
       downloadLink.href = '/api/recordings/' + encodeURIComponent(recording.id) + '/download';
@@ -1216,7 +1392,13 @@ async function loadRecordings() {
 }
 
 async function leaveCall() {
-  try { await stopRecording(); } catch {}
+  if (isHost && signalingReady() && (recordingLive || recordingControlPending)) {
+    try {
+      requestRoomRecordingStop();
+      await new Promise((resolve) => setTimeout(resolve, 1700));
+    } catch {}
+  }
+  try { await stopRecording({ syncStoppedAt: currentSyncStoppedAt || syncedNow() }); } catch {}
   if (ws) ws.close();
   for (const id of [...peers.keys()]) closePeer(id);
   if (localStream) for (const track of localStream.getTracks()) track.stop();
@@ -1245,8 +1427,12 @@ if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
 $('join-button').addEventListener('click', () => joinCall().catch((error) => { $('join-button').disabled = false; $('join-button').textContent = 'Join call'; updateJoinAvailability(); showError(error); }));
 $('toggle-microphone').addEventListener('click', () => setLocalAudioEnabled(!localAudioEnabled));
 $('toggle-camera').addEventListener('click', () => setLocalVideoEnabled(!localVideoEnabled));
-$('start-recording').addEventListener('click', () => startRecording().catch(showError));
-$('stop-recording').addEventListener('click', () => stopRecording().catch(showError));
+$('start-recording').addEventListener('click', () => {
+  try { requestRoomRecordingStart(); } catch (error) { showError(error); }
+});
+$('stop-recording').addEventListener('click', () => {
+  try { requestRoomRecordingStop(); } catch (error) { showError(error); }
+});
 $('leave-button').addEventListener('click', () => leaveCall().catch(showError));
 $('refresh-recordings').addEventListener('click', () => loadRecordings().catch(showError));
 $('signout-button').addEventListener('click', async () => {

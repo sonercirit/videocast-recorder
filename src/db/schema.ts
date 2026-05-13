@@ -66,6 +66,9 @@ export const recordings = sqliteTable(
     }).notNull(),
     frameRate: integer("frame_rate").notNull().default(30),
     mimeType: text("mime_type").notNull(),
+    recordingSessionId: text("recording_session_id"),
+    syncStartedAt: integer("sync_started_at", { mode: "timestamp_ms" }),
+    syncStoppedAt: integer("sync_stopped_at", { mode: "timestamp_ms" }),
     status: text("status", {
       enum: ["recording", "completed", "failed"],
     })
@@ -82,6 +85,10 @@ export const recordings = sqliteTable(
   (table) => ({
     roomIdx: index("recordings_room_id_idx").on(table.roomId),
     userIdx: index("recordings_user_id_idx").on(table.userId),
+    sessionIdx: index("recordings_session_idx").on(
+      table.roomId,
+      table.recordingSessionId,
+    ),
     statusIdx: index("recordings_status_idx").on(table.status),
   }),
 );

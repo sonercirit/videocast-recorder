@@ -7,7 +7,7 @@ A Cloudflare-native videocast prototype using:
 - **Drizzle ORM** with **Cloudflare D1** for metadata
 - **Cloudflare R2** for local recording chunks
 - **Durable Objects** for WebRTC signaling
-- Browser **MediaRecorder** for background local recordings with user-selectable quality and frame rate up to 4K 60 FPS
+- Browser **MediaRecorder** for host-controlled, synchronized local recordings with user-selectable quality and frame rate up to 4K 60 FPS
 
 ## Architecture
 
@@ -15,7 +15,8 @@ A Cloudflare-native videocast prototype using:
 - Authenticated users create open videocast rooms.
 - Guests join rooms and connect peer-to-peer over WebRTC.
 - A Durable Object per room relays SDP/ICE signaling messages.
-- Each participant records their own local camera/mic stream in the browser.
+- The room host starts/stops a synced recording session for everyone over the room Durable Object.
+- Each participant records their own local camera/mic stream in the browser, tagged with the shared recording session ID and sync timestamps for later editing.
 - Recording quality and frame-rate presets, including 2K, Ultra 4K, and 60 FPS options, are exposed by `/api/recording-qualities`.
 - MediaRecorder emits chunks every 5s; chunks upload to R2 under:
   `rooms/{roomId}/recordings/{recordingId}/chunks/{000000}.webm`
