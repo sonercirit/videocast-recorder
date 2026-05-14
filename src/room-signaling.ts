@@ -34,6 +34,11 @@ type ClientSignal = {
   data?: unknown;
 };
 
+type InternalSignal = {
+  type: string;
+  userId?: string;
+};
+
 export class RoomSignaling {
   private sessions = new Map<string, SignalSession>();
   private recordingState: RoomRecordingState | null = null;
@@ -45,11 +50,11 @@ export class RoomSignaling {
   ) {}
 
   async fetch(request: Request): Promise<Response> {
-    if (request.headers.get("Upgrade") !== "websocket") {
-      return new Response("Expected WebSocket upgrade", { status: 426 });
-    }
-
     await this.ensureInitialized();
+
+    if (request.headers.get("Upgrade") !== "websocket") {
+      return this.handleInternalRequest(request);
+    }
 
     const pair = new WebSocketPair();
     const client = pair[0];
@@ -115,6 +120,35 @@ export class RoomSignaling {
     server.addEventListener("error", cleanup);
 
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  private async handleInternalRequest(request: Request): Promise<Response> {
+    if (request.method !== "POST") {
+      return new Response("Expected WebSocket upgrade", { status: 426 });
+    }
+
+    let message: InternalSignal;
+    try {
+      message = (await request.json()) as InternalSignal;
+    } catch {
+      return Response.json(
+        { error: "Invalid internal message" },
+        { status: 400 },
+      );
+    }
+
+    if (message.type === "ban-user" && message.userId) {
+      const disconnected = this.disconnectUser(
+        message.userId,
+        "You were banned from this room by the host.",
+      );
+      return Response.json({ ok: true, disconnected });
+    }
+
+    return Response.json(
+      { error: "Unknown internal message" },
+      { status: 400 },
+    );
   }
 
   private async handleClientMessage(
@@ -250,6 +284,23 @@ export class RoomSignaling {
       if (id === excludedId) continue;
       this.send(session.socket, message);
     }
+  }
+
+  private disconnectUser(userId: string, message: string) {
+    let disconnected = 0;
+    for (const [participantId, session] of [...this.sessions.entries()]) {
+      if (session.userId !== userId) continue;
+      this.send(session.socket, { type: "banned", message });
+      this.sessions.delete(participantId);
+      disconnected += 1;
+      try {
+        session.socket.close(4003, "Banned from room");
+      } catch {
+        // Ignore stale sockets.
+      }
+      this.broadcast({ type: "participant-left", participantId });
+    }
+    return disconnected;
   }
 
   private sendToParticipant(participantId: string, message: unknown) {

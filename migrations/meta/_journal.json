@@ -22,6 +22,13 @@
       "when": 1778715063687,
       "tag": "0002_first_smiling_tiger",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1778716909733,
+      "tag": "0003_vengeful_archangel",
+      "breakpoints": true
     }
   ]
 }

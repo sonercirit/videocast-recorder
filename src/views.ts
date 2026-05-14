@@ -65,6 +65,9 @@ label { display: grid; gap: 0.35rem; color: #b8c2d8; font-size: 0.92rem; }
 @media (max-width: 720px) { .join-devices { grid-template-columns: 1fr; } }
 .recording-list { display: grid; gap: 0.75rem; }
 .recording-item { border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.03); border-radius: 0.9rem; padding: 0.85rem; }
+.moderation-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; }
+.moderation-list { display: grid; gap: 0.75rem; }
+.moderation-item { display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; padding: 0.8rem; border: 1px solid rgba(255,255,255,0.08); border-radius: 0.9rem; background: rgba(255,255,255,0.03); }
 .small { font-size: 0.88rem; }
 `;
 
@@ -119,7 +122,7 @@ export function homePage() {
   <div class="row spread">
     <div>
       <h2>Your videocast lobby</h2>
-      <p class="muted">Open rooms are visible to signed-in users. Share the room link to invite guests.</p>
+      <p class="muted">Rooms are private. Only you can see a new room until someone joins with its link.</p>
     </div>
   </div>
 
@@ -132,7 +135,7 @@ export function homePage() {
     </form>
 
     <div class="card stack">
-      <div class="row spread"><h3>Open rooms</h3><button id="refresh-rooms" class="secondary" type="button">Refresh</button></div>
+      <div class="row spread"><h3>Your rooms</h3><button id="refresh-rooms" class="secondary" type="button">Refresh</button></div>
       <div id="rooms" class="room-list"><p class="muted">Loading rooms...</p></div>
     </div>
   </div>
@@ -190,7 +193,7 @@ async function loadRooms() {
   container.innerHTML = '<p class="muted">Loading rooms...</p>';
   const data = await api('/api/rooms');
   if (!data.rooms.length) {
-    container.innerHTML = '<p class="muted">No open rooms yet. Create one to start.</p>';
+    container.innerHTML = '<p class="muted">No rooms yet. Create one to start.</p>';
     return;
   }
   container.innerHTML = '';
@@ -317,6 +320,26 @@ export function roomPage(roomId: string) {
     </div>
   </div>
 
+  <div id="host-moderation-panel" class="card stack hidden">
+    <div class="row spread">
+      <div>
+        <h3>Host moderation</h3>
+        <p class="muted small">Ban disruptive guests immediately, or unban them later.</p>
+      </div>
+      <button id="refresh-bans" class="secondary" type="button">Refresh banned users</button>
+    </div>
+    <div class="moderation-grid">
+      <div class="stack">
+        <h4>Active participants</h4>
+        <div id="participant-list" class="moderation-list"><p class="muted">Join the call to see active participants.</p></div>
+      </div>
+      <div class="stack">
+        <h4>Banned users</h4>
+        <div id="banned-users" class="moderation-list"><p class="muted">No banned users.</p></div>
+      </div>
+    </div>
+  </div>
+
   <div class="card stack">
     <div class="row spread"><h3>Recordings for this room</h3><button id="refresh-recordings" class="secondary" type="button">Refresh</button></div>
     <div id="recordings" class="recording-list"><p class="muted">No recordings yet.</p></div>
@@ -330,6 +353,9 @@ const $ = (id) => document.getElementById(id);
 let me = null;
 let room = null;
 let isHost = false;
+let hasJoinedRoom = false;
+let bannedUsers = [];
+let bannedUserIds = new Set();
 let qualityPresets = {};
 let frameRatePresets = [];
 let selectedQuality = 'medium';
@@ -367,6 +393,7 @@ let pendingRecordingStartTimer = null;
 let pendingRecordingStopTimer = null;
 let uploadedChunkCount = 0;
 let uploadChain = Promise.resolve();
+let bannedRedirecting = false;
 
 async function api(path, options) {
   const init = Object.assign({ credentials: 'include' }, options || {});
@@ -440,6 +467,117 @@ function setRecordingState(message, live, pending) {
   updateRecordingControls();
 }
 
+function updateHostModerationVisibility() {
+  const panel = $('host-moderation-panel');
+  if (panel) panel.classList.toggle('hidden', !isHost);
+  renderParticipantsList();
+  renderBannedUsers();
+}
+
+function userLabel(user, fallbackId) {
+  user = user || {};
+  const name = user.name || '';
+  const email = user.email || '';
+  let label = name && email && name !== email ? name + ' · ' + email : (name || email);
+  if (!label && fallbackId) label = 'User ' + String(fallbackId).slice(0, 8);
+  return label || 'Unknown user';
+}
+
+function renderParticipantsList() {
+  const container = $('participant-list');
+  if (!container || !isHost) return;
+  const activeParticipants = [...participants.values()].filter((participant) => participant.userId !== me?.id);
+  container.innerHTML = '';
+  if (!participantId) {
+    container.innerHTML = '<p class="muted">Join the call to see active participants.</p>';
+    return;
+  }
+  if (!activeParticipants.length) {
+    container.innerHTML = '<p class="muted">No other active participants.</p>';
+    return;
+  }
+
+  for (const participant of activeParticipants) {
+    const item = document.createElement('div');
+    item.className = 'moderation-item';
+    const details = document.createElement('div');
+    const title = document.createElement('strong');
+    title.textContent = participant.displayName || 'Guest';
+    const meta = document.createElement('div');
+    meta.className = 'muted small';
+    meta.textContent = participant.isHost ? 'Host' : (participant.userId ? 'User ' + String(participant.userId).slice(0, 8) : 'User unknown');
+    details.appendChild(title);
+    details.appendChild(meta);
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'danger';
+    const alreadyBanned = participant.userId && bannedUserIds.has(participant.userId);
+    button.textContent = alreadyBanned ? 'Banned' : 'Ban';
+    button.disabled = !participant.userId || participant.isHost || alreadyBanned;
+    button.addEventListener('click', () => banParticipant(participant).catch(showError));
+    item.appendChild(details);
+    item.appendChild(button);
+    container.appendChild(item);
+  }
+}
+
+function renderBannedUsers() {
+  const container = $('banned-users');
+  if (!container || !isHost) return;
+  container.innerHTML = '';
+  if (!bannedUsers.length) {
+    container.innerHTML = '<p class="muted">No banned users.</p>';
+    return;
+  }
+
+  for (const ban of bannedUsers) {
+    const item = document.createElement('div');
+    item.className = 'moderation-item';
+    const details = document.createElement('div');
+    const title = document.createElement('strong');
+    title.textContent = userLabel(ban.user, ban.userId);
+    const meta = document.createElement('div');
+    meta.className = 'muted small';
+    meta.textContent = 'Banned ' + new Date(ban.createdAt).toLocaleString();
+    details.appendChild(title);
+    details.appendChild(meta);
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'secondary';
+    button.textContent = 'Unban';
+    button.addEventListener('click', () => unbanUser(ban.id).catch(showError));
+    item.appendChild(details);
+    item.appendChild(button);
+    container.appendChild(item);
+  }
+}
+
+async function loadBannedUsers() {
+  if (!isHost) return;
+  const data = await api('/api/rooms/' + window.ROOM_ID + '/bans');
+  bannedUsers = data.bans || [];
+  bannedUserIds = new Set(bannedUsers.map((ban) => ban.userId));
+  renderBannedUsers();
+  renderParticipantsList();
+}
+
+async function banParticipant(participant) {
+  if (!isHost || !participant?.userId) return;
+  const label = participant.displayName || 'this participant';
+  if (!window.confirm('Ban ' + label + ' from this room? They will be disconnected immediately and cannot rejoin until unbanned.')) return;
+  await api('/api/rooms/' + window.ROOM_ID + '/bans', {
+    method: 'POST',
+    body: { userId: participant.userId },
+  });
+  await loadBannedUsers();
+}
+
+async function unbanUser(banId) {
+  if (!isHost || !banId) return;
+  await api('/api/rooms/' + window.ROOM_ID + '/bans/' + encodeURIComponent(banId), { method: 'DELETE' });
+  await loadBannedUsers();
+}
+
 async function init() {
   try {
     const meData = await api('/api/me');
@@ -450,10 +588,14 @@ async function init() {
 
     const roomData = await api('/api/rooms/' + window.ROOM_ID);
     room = roomData.room;
-    isHost = room.ownerUserId === me.id;
+    const access = roomData.access || {};
+    isHost = access.isHost !== undefined ? Boolean(access.isHost) : room.ownerUserId === me.id;
+    hasJoinedRoom = Boolean(access.hasJoined) || isHost;
     updateRecordingControls();
+    updateHostModerationVisibility();
     $('room-name').textContent = room.name;
-    $('room-meta').textContent = 'Room link: ' + window.location.href;
+    $('room-meta').textContent = 'Private room link: ' + window.location.href;
+    if (isHost) await loadBannedUsers();
 
     const qualityData = await api('/api/recording-qualities');
     qualityPresets = qualityData.qualities;
@@ -462,7 +604,11 @@ async function init() {
     renderQualityOptions();
     renderFrameRateOptions();
     detectDevicesAndHardware().catch(showError);
-    await loadRecordings();
+    if (isHost || hasJoinedRoom) {
+      await loadRecordings();
+    } else {
+      $('recordings').innerHTML = '<p class="muted">Join this private room to see recordings.</p>';
+    }
   } catch (error) {
     showError(error);
     if ((error.message || '').toLowerCase().includes('unauthorized')) window.location.href = '/';
@@ -894,6 +1040,9 @@ async function joinCall() {
     body: { displayName: me.name || me.email },
   });
   participantId = joinData.participant.id;
+  hasJoinedRoom = true;
+  loadRecordings().catch(showError);
+  renderParticipantsList();
 
   $('join-panel').classList.add('hidden');
   $('call-panel').classList.remove('hidden');
@@ -917,7 +1066,11 @@ function connectSignaling() {
       showError(error);
     }
   });
-  ws.addEventListener('close', () => {
+  ws.addEventListener('close', (event) => {
+    if (event.code === 4003) {
+      handleBanned({ message: 'You were banned from this room by the host.' });
+      return;
+    }
     setCallStatus('Disconnected from room signaling.');
     updateRecordingControls();
   });
@@ -933,11 +1086,14 @@ async function handleSignal(message) {
 
   if (message.type === 'welcome') {
     participantId = message.participantId;
+    participants.clear();
+    participantMediaStates.clear();
     for (const participant of message.participants || []) {
       participants.set(participant.id, participant);
       if (participant.mediaState) participantMediaStates.set(participant.id, normalizeMediaState(participant.mediaState));
     }
     setCallStatus('Joined. Peers in room: ' + (message.participants || []).length);
+    renderParticipantsList();
     sendLocalMediaState();
     if (message.recordingState && message.recordingState.active) {
       scheduleRoomRecordingStart(message.recordingState);
@@ -950,6 +1106,7 @@ async function handleSignal(message) {
     participants.set(message.participant.id, message.participant);
     if (message.participant.mediaState) participantMediaStates.set(message.participant.id, normalizeMediaState(message.participant.mediaState));
     setCallStatus((message.participant.displayName || 'A participant') + ' joined.');
+    renderParticipantsList();
     sendLocalMediaState();
     return;
   }
@@ -959,11 +1116,13 @@ async function handleSignal(message) {
     participants.delete(message.participantId);
     participantMediaStates.delete(message.participantId);
     setCallStatus('A participant left.');
+    renderParticipantsList();
     return;
   }
 
   if (message.type === 'offer') {
-    participants.set(message.from, { id: message.from, displayName: message.fromName || 'Guest' });
+    participants.set(message.from, Object.assign({ id: message.from, displayName: message.fromName || 'Guest' }, participants.get(message.from) || {}));
+    renderParticipantsList();
     const pc = ensurePeer(message.from);
     await pc.setRemoteDescription(new RTCSessionDescription(message.data));
     const answer = await pc.createAnswer();
@@ -999,6 +1158,11 @@ async function handleSignal(message) {
 
   if (message.type === 'recording-stop') {
     scheduleRoomRecordingStop(message.recording);
+    return;
+  }
+
+  if (message.type === 'banned') {
+    handleBanned(message);
     return;
   }
 
@@ -1159,6 +1323,37 @@ function closePeer(id) {
   peers.delete(id);
   const card = document.getElementById('remote-' + id);
   if (card) card.remove();
+}
+
+function handleBanned(message) {
+  if (bannedRedirecting) return;
+  bannedRedirecting = true;
+  clearPendingRecordingTimers();
+  const activeRecorder = mediaRecorder;
+  currentRecordingId = null;
+  currentRecordingSessionId = null;
+  currentSyncStartedAt = null;
+  currentSyncStoppedAt = null;
+  mediaRecorder = null;
+  recordingStopPromise = null;
+  try {
+    if (activeRecorder && activeRecorder.state !== 'inactive') activeRecorder.stop();
+  } catch {}
+  if (ws) {
+    try { ws.close(); } catch {}
+  }
+  for (const id of [...peers.keys()]) closePeer(id);
+  participants.clear();
+  participantMediaStates.clear();
+  renderParticipantsList();
+  if (localStream) for (const track of localStream.getTracks()) track.stop();
+  localStream = null;
+  $('call-panel').classList.add('hidden');
+  $('join-panel').classList.add('hidden');
+  setRecordingState('Not recording', false, false);
+  setCallStatus('Removed from room.');
+  showError(new Error(message.message || 'You were banned from this room by the host.'));
+  window.setTimeout(() => { window.location.href = '/'; }, 2500);
 }
 
 function clearPendingRecordingTimers() {
@@ -1377,6 +1572,10 @@ function recordingOwnerLabel(recording) {
 async function loadRecordings() {
   const container = $('recordings');
   if (!container) return;
+  if (!isHost && !hasJoinedRoom) {
+    container.innerHTML = '<p class="muted">Join this private room to see recordings.</p>';
+    return;
+  }
   const data = await api('/api/rooms/' + window.ROOM_ID + '/recordings');
   if (!data.recordings.length) {
     container.innerHTML = '<p class="muted">No recordings yet.</p>';
@@ -1453,6 +1652,7 @@ $('stop-recording').addEventListener('click', () => {
 });
 $('leave-button').addEventListener('click', () => leaveCall().catch(showError));
 $('refresh-recordings').addEventListener('click', () => loadRecordings().catch(showError));
+$('refresh-bans').addEventListener('click', () => loadBannedUsers().catch(showError));
 $('signout-button').addEventListener('click', async () => {
   await fetch('/api/auth/sign-out', { method: 'POST', credentials: 'include' });
   window.location.href = '/';

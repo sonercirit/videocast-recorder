@@ -1,4 +1,4 @@
-import { and, asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, or } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
@@ -89,6 +89,15 @@ const joinRoomSchema = z.object({
   displayName: z.string().trim().min(1).max(80).optional(),
 });
 
+const banUserSchema = z
+  .object({
+    userId: z.string().trim().min(1).optional(),
+    participantId: z.string().trim().min(1).optional(),
+  })
+  .refine((value) => value.userId || value.participantId, {
+    message: "Expected userId or participantId",
+  });
+
 const startRecordingSchema = z.object({
   quality: qualitySchema,
   frameRate: frameRateSchema.default(30),
@@ -130,15 +139,40 @@ app.get("/api/rooms", async (c) => {
   const auth = await getSession(c);
   if (!auth) return c.json({ error: "Unauthorized" }, 401);
 
-  const rooms = await c
-    .get("db")
-    .select()
+  const db = c.get("db");
+  const rows = await db
+    .select({ room: schema.rooms })
     .from(schema.rooms)
-    .where(eq(schema.rooms.isOpen, true))
+    .leftJoin(
+      schema.roomParticipants,
+      and(
+        eq(schema.roomParticipants.roomId, schema.rooms.id),
+        eq(schema.roomParticipants.userId, auth.user.id),
+      ),
+    )
+    .where(
+      or(
+        eq(schema.rooms.ownerUserId, auth.user.id),
+        eq(schema.roomParticipants.userId, auth.user.id),
+      ),
+    )
+    .groupBy(schema.rooms.id)
     .orderBy(desc(schema.rooms.createdAt))
     .limit(50);
 
-  return c.json({ rooms });
+  const bannedRows = await db
+    .select({ roomId: schema.roomBans.roomId })
+    .from(schema.roomBans)
+    .where(eq(schema.roomBans.userId, auth.user.id));
+  const bannedRoomIds = new Set(bannedRows.map((row) => row.roomId));
+  const roomsById = new Map<string, typeof schema.rooms.$inferSelect>();
+  for (const { room } of rows) {
+    if (!bannedRoomIds.has(room.id) && !roomsById.has(room.id)) {
+      roomsById.set(room.id, room);
+    }
+  }
+
+  return c.json({ rooms: [...roomsById.values()].slice(0, 50) });
 });
 
 app.post("/api/rooms", async (c) => {
@@ -169,11 +203,16 @@ app.get("/api/rooms/:roomId", async (c) => {
 
   const room = await getRoom(c.get("db"), c.req.param("roomId"));
   if (!room) return c.json({ error: "Room not found" }, 404);
-  if (!room.isOpen && room.ownerUserId !== auth.user.id) {
+
+  const access = await getRoomAccess(c.get("db"), room, auth.user.id);
+  if (access.banned) {
+    return c.json({ error: "You are banned from this room" }, 403);
+  }
+  if (!room.isOpen && !access.isHost && !access.hasJoined) {
     return c.json({ error: "Room is closed" }, 403);
   }
 
-  return c.json({ room });
+  return c.json({ room, access });
 });
 
 app.post("/api/rooms/:roomId/join", async (c) => {
@@ -184,6 +223,11 @@ app.post("/api/rooms/:roomId/join", async (c) => {
   const room = await getRoom(c.get("db"), roomId);
   if (!room) return c.json({ error: "Room not found" }, 404);
   if (!room.isOpen) return c.json({ error: "Room is closed" }, 403);
+
+  const access = await getRoomAccess(c.get("db"), room, auth.user.id);
+  if (access.banned) {
+    return c.json({ error: "You are banned from this room" }, 403);
+  }
 
   const input = await parseJson(c, joinRoomSchema, {});
   const displayName =
@@ -202,6 +246,159 @@ app.post("/api/rooms/:roomId/join", async (c) => {
 
   await c.get("db").insert(schema.roomParticipants).values(participant);
   return c.json({ participant }, 201);
+});
+
+app.get("/api/rooms/:roomId/bans", async (c) => {
+  const auth = await getSession(c);
+  if (!auth) return c.json({ error: "Unauthorized" }, 401);
+
+  const roomId = c.req.param("roomId");
+  const room = await getRoom(c.get("db"), roomId);
+  if (!room) return c.json({ error: "Room not found" }, 404);
+  if (room.ownerUserId !== auth.user.id) {
+    return c.json({ error: "Only the host can view banned users" }, 403);
+  }
+
+  const rows = await c
+    .get("db")
+    .select({
+      ban: schema.roomBans,
+      user: {
+        id: schema.user.id,
+        name: schema.user.name,
+        email: schema.user.email,
+      },
+    })
+    .from(schema.roomBans)
+    .leftJoin(schema.user, eq(schema.roomBans.userId, schema.user.id))
+    .where(eq(schema.roomBans.roomId, roomId))
+    .orderBy(desc(schema.roomBans.createdAt));
+
+  return c.json({
+    bans: rows.map(({ ban, user }) => ({ ...ban, user })),
+  });
+});
+
+app.post("/api/rooms/:roomId/bans", async (c) => {
+  const auth = await getSession(c);
+  if (!auth) return c.json({ error: "Unauthorized" }, 401);
+
+  const input = await parseJson(c, banUserSchema);
+  if (!input.success) return c.json({ error: input.error }, 400);
+
+  const db = c.get("db");
+  const roomId = c.req.param("roomId");
+  const room = await getRoom(db, roomId);
+  if (!room) return c.json({ error: "Room not found" }, 404);
+  if (room.ownerUserId !== auth.user.id) {
+    return c.json({ error: "Only the host can ban users" }, 403);
+  }
+
+  let targetUserId = input.data.userId;
+  if (input.data.participantId) {
+    const [participant] = await db
+      .select()
+      .from(schema.roomParticipants)
+      .where(
+        and(
+          eq(schema.roomParticipants.id, input.data.participantId),
+          eq(schema.roomParticipants.roomId, roomId),
+        ),
+      )
+      .limit(1);
+    if (!participant) return c.json({ error: "Participant not found" }, 404);
+    targetUserId = participant.userId;
+  }
+
+  if (!targetUserId) return c.json({ error: "Missing userId" }, 400);
+  if (targetUserId === room.ownerUserId) {
+    return c.json({ error: "The host cannot be banned" }, 400);
+  }
+  const [targetUser] = await db
+    .select({ id: schema.user.id })
+    .from(schema.user)
+    .where(eq(schema.user.id, targetUserId))
+    .limit(1);
+  if (!targetUser) return c.json({ error: "User not found" }, 404);
+
+  const now = new Date();
+  const ban = {
+    id: newId("ban"),
+    roomId,
+    userId: targetUserId,
+    bannedByUserId: auth.user.id,
+    createdAt: now,
+  };
+
+  await db
+    .insert(schema.roomBans)
+    .values(ban)
+    .onConflictDoNothing({
+      target: [schema.roomBans.roomId, schema.roomBans.userId],
+    });
+
+  await db
+    .update(schema.roomParticipants)
+    .set({ leftAt: now })
+    .where(
+      and(
+        eq(schema.roomParticipants.roomId, roomId),
+        eq(schema.roomParticipants.userId, targetUserId),
+      ),
+    );
+
+  await notifyRoomSignaling(c.env, roomId, {
+    type: "ban-user",
+    userId: targetUserId,
+  });
+
+  const [savedBan] = await db
+    .select({
+      ban: schema.roomBans,
+      user: {
+        id: schema.user.id,
+        name: schema.user.name,
+        email: schema.user.email,
+      },
+    })
+    .from(schema.roomBans)
+    .leftJoin(schema.user, eq(schema.roomBans.userId, schema.user.id))
+    .where(
+      and(
+        eq(schema.roomBans.roomId, roomId),
+        eq(schema.roomBans.userId, targetUserId),
+      ),
+    )
+    .limit(1);
+
+  return c.json(
+    { ban: savedBan ? { ...savedBan.ban, user: savedBan.user } : ban },
+    201,
+  );
+});
+
+app.delete("/api/rooms/:roomId/bans/:banId", async (c) => {
+  const auth = await getSession(c);
+  if (!auth) return c.json({ error: "Unauthorized" }, 401);
+
+  const roomId = c.req.param("roomId");
+  const room = await getRoom(c.get("db"), roomId);
+  if (!room) return c.json({ error: "Room not found" }, 404);
+  if (room.ownerUserId !== auth.user.id) {
+    return c.json({ error: "Only the host can unban users" }, 403);
+  }
+
+  await c
+    .get("db")
+    .delete(schema.roomBans)
+    .where(
+      and(
+        eq(schema.roomBans.id, c.req.param("banId")),
+        eq(schema.roomBans.roomId, roomId),
+      ),
+    );
+
+  return c.json({ ok: true });
 });
 
 app.post("/api/rooms/:roomId/participants/:participantId/leave", async (c) => {
@@ -236,7 +433,11 @@ app.get("/api/rooms/:roomId/signaling", async (c) => {
 
   const room = await getRoom(c.get("db"), roomId);
   if (!room) return c.json({ error: "Room not found" }, 404);
-  if (!room.isOpen && room.ownerUserId !== auth.user.id) {
+  const access = await getRoomAccess(c.get("db"), room, auth.user.id);
+  if (access.banned) {
+    return c.json({ error: "You are banned from this room" }, 403);
+  }
+  if (!room.isOpen && !access.isHost) {
     return c.json({ error: "Room is closed" }, 403);
   }
 
@@ -274,6 +475,13 @@ app.post("/api/rooms/:roomId/recordings/start", async (c) => {
   const room = await getRoom(c.get("db"), roomId);
   if (!room) return c.json({ error: "Room not found" }, 404);
   if (!room.isOpen) return c.json({ error: "Room is closed" }, 403);
+  const access = await getRoomAccess(c.get("db"), room, auth.user.id);
+  if (access.banned) {
+    return c.json({ error: "You are banned from this room" }, 403);
+  }
+  if (!access.isHost && !access.hasJoined) {
+    return c.json({ error: "Join this room before recording" }, 403);
+  }
 
   const input = await parseJson(c, startRecordingSchema);
   if (!input.success) return c.json({ error: input.error }, 400);
@@ -327,6 +535,12 @@ app.put(
     if (!recording) return c.json({ error: "Recording not found" }, 404);
     if (recording.userId !== auth.user.id)
       return c.json({ error: "Forbidden" }, 403);
+    const room = await getRoom(c.get("db"), recording.roomId);
+    if (!room) return c.json({ error: "Room not found" }, 404);
+    const access = await getRoomAccess(c.get("db"), room, auth.user.id);
+    if (access.banned) {
+      return c.json({ error: "You are banned from this room" }, 403);
+    }
     if (recording.status !== "recording")
       return c.json({ error: "Recording is not accepting chunks" }, 409);
     if (!c.req.raw.body) return c.json({ error: "Missing chunk body" }, 400);
@@ -400,6 +614,12 @@ app.post("/api/rooms/:roomId/recordings/:recordingId/complete", async (c) => {
   if (!recording) return c.json({ error: "Recording not found" }, 404);
   if (recording.userId !== auth.user.id)
     return c.json({ error: "Forbidden" }, 403);
+  const room = await getRoom(c.get("db"), recording.roomId);
+  if (!room) return c.json({ error: "Room not found" }, 404);
+  const access = await getRoomAccess(c.get("db"), room, auth.user.id);
+  if (access.banned) {
+    return c.json({ error: "You are banned from this room" }, 403);
+  }
 
   const input = await parseJson(c, completeRecordingSchema);
   if (!input.success) return c.json({ error: input.error }, 400);
@@ -473,6 +693,13 @@ app.get("/api/rooms/:roomId/recordings", async (c) => {
   const roomId = c.req.param("roomId");
   const room = await getRoom(c.get("db"), roomId);
   if (!room) return c.json({ error: "Room not found" }, 404);
+  const access = await getRoomAccess(c.get("db"), room, auth.user.id);
+  if (access.banned) {
+    return c.json({ error: "You are banned from this room" }, 403);
+  }
+  if (!access.isHost && !access.hasJoined) {
+    return c.json({ error: "Join this room to view recordings" }, 403);
+  }
 
   const where =
     room.ownerUserId === auth.user.id
@@ -515,7 +742,11 @@ app.get("/api/recordings/:recordingId/download", async (c) => {
 
   const room = await getRoom(c.get("db"), recording.roomId);
   if (!room) return c.json({ error: "Room not found" }, 404);
-  if (recording.userId !== auth.user.id && room.ownerUserId !== auth.user.id) {
+  const access = await getRoomAccess(c.get("db"), room, auth.user.id);
+  if (access.banned) {
+    return c.json({ error: "You are banned from this room" }, 403);
+  }
+  if (recording.userId !== auth.user.id && !access.isHost) {
     return c.json({ error: "Forbidden" }, 403);
   }
   if (recording.status !== "completed") {
@@ -573,7 +804,11 @@ app.get("/api/recordings/:recordingId/chunks/:chunkIndex", async (c) => {
 
   const room = await getRoom(c.get("db"), recording.roomId);
   if (!room) return c.json({ error: "Room not found" }, 404);
-  if (recording.userId !== auth.user.id && room.ownerUserId !== auth.user.id) {
+  const access = await getRoomAccess(c.get("db"), room, auth.user.id);
+  if (access.banned) {
+    return c.json({ error: "You are banned from this room" }, 403);
+  }
+  if (recording.userId !== auth.user.id && !access.isHost) {
     return c.json({ error: "Forbidden" }, 403);
   }
 
@@ -649,6 +884,42 @@ async function getRoom(db: Database, roomId: string) {
   return room ?? null;
 }
 
+async function getRoomAccess(
+  db: Database,
+  room: typeof schema.rooms.$inferSelect,
+  userId: string,
+) {
+  const isHost = room.ownerUserId === userId;
+  const [[participant], [ban]] = await Promise.all([
+    db
+      .select({ id: schema.roomParticipants.id })
+      .from(schema.roomParticipants)
+      .where(
+        and(
+          eq(schema.roomParticipants.roomId, room.id),
+          eq(schema.roomParticipants.userId, userId),
+        ),
+      )
+      .limit(1),
+    db
+      .select({ id: schema.roomBans.id })
+      .from(schema.roomBans)
+      .where(
+        and(
+          eq(schema.roomBans.roomId, room.id),
+          eq(schema.roomBans.userId, userId),
+        ),
+      )
+      .limit(1),
+  ]);
+
+  return {
+    isHost,
+    hasJoined: isHost || Boolean(participant),
+    banned: !isHost && Boolean(ban),
+  };
+}
+
 async function getRecording(
   db: Database,
   recordingId: string,
@@ -666,6 +937,20 @@ async function getRecording(
     .where(where)
     .limit(1);
   return recording ?? null;
+}
+
+async function notifyRoomSignaling(env: Env, roomId: string, message: unknown) {
+  try {
+    const objectId = env.ROOM_SIGNALING.idFromName(roomId);
+    const stub = env.ROOM_SIGNALING.get(objectId);
+    await stub.fetch("https://room-signaling.internal/internal", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(message),
+    });
+  } catch {
+    // A ban is persisted in D1 even if no signaling object is currently active.
+  }
 }
 
 function newId(prefix: string) {

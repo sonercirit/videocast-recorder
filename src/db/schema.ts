@@ -51,6 +51,31 @@ export const roomParticipants = sqliteTable(
   }),
 );
 
+export const roomBans = sqliteTable(
+  "room_bans",
+  {
+    id: text("id").primaryKey(),
+    roomId: text("room_id")
+      .notNull()
+      .references(() => rooms.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    bannedByUserId: text("banned_by_user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+  },
+  (table) => ({
+    roomUserIdx: uniqueIndex("room_bans_room_user_unique").on(
+      table.roomId,
+      table.userId,
+    ),
+    roomIdx: index("room_bans_room_id_idx").on(table.roomId),
+    userIdx: index("room_bans_user_id_idx").on(table.userId),
+  }),
+);
+
 export const recordings = sqliteTable(
   "recordings",
   {
@@ -121,6 +146,7 @@ export const roomRelations = relations(rooms, ({ one, many }) => ({
     references: [user.id],
   }),
   participants: many(roomParticipants),
+  bans: many(roomBans),
   recordings: many(recordings),
 }));
 
@@ -159,5 +185,20 @@ export const roomParticipantRelations = relations(
     }),
   }),
 );
+
+export const roomBanRelations = relations(roomBans, ({ one }) => ({
+  room: one(rooms, {
+    fields: [roomBans.roomId],
+    references: [rooms.id],
+  }),
+  user: one(user, {
+    fields: [roomBans.userId],
+    references: [user.id],
+  }),
+  bannedBy: one(user, {
+    fields: [roomBans.bannedByUserId],
+    references: [user.id],
+  }),
+}));
 
 export const nowSql = sql`(unixepoch())`;
